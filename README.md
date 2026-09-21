@@ -1,4 +1,4 @@
-# Sentinel — firmware security analysis
+# Sentinel: firmware security analysis
 
 Point it at a firmware image. It extracts, analyses, optionally boots the
 thing, and reports findings that carry evidence you can re-check later.
