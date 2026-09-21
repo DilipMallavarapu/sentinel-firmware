@@ -1,6 +1,9 @@
 """
-sentinel.firmware.emulate
+2sentinel.firmware.emulate
+=========================
+
 User-mode emulation, and the runtime oracle it exists to produce.
+
 Full-system emulation is the obvious approach and the wrong place to start.
 Booting a vendor image end to end means getting the kernel, device tree, NVRAM
 contents and a dozen peripheral stubs right, and on most images you lose days
@@ -9,34 +12,42 @@ static QEMU into the rootfs, chroot, and run one CGI binary directly. It works
 on the first afternoon for a large fraction of images, and one CGI binary
 answering is enough to produce `runtime_diff` proofs -- which is the only
 thing the static lane cannot give you.
+
 What this buys, concretely: `fw.creds.hardcoded` confirms that a hash sits in
 /etc/shadow. That is a presence fact and it stays one forever. If the login
 CGI runs here and a request carrying that credential returns a different
 response than a control request, the finding crosses to REACHABILITY with a
 stored transcript proving it. Nothing else in the pipeline can make that
 crossing.
+
 Running vendor binaries
+-----------------------
 This stage executes untrusted third-party code. Not hypothetically -- that is
 its entire job. The guards below are not decoration:
-the rootfs is copied first; the original extraction is never the thing we
-execute against, so a binary that scribbles on its own filesystem cannot
-corrupt the evidence other stages already captured
-no network namespace, when `unshare` is available. A firmware binary that
-phones a vendor endpoint from your address is an out-of-scope request you
-made by accident, and `Scope.allow_emulated_egress` is the only thing that
-permits it
-CPU, address-space and file-size rlimits, plus a wall-clock timeout. Crypto
-init loops and fork bombs are common in half-emulated firmware, not rare
-never as root. uid 0 inside a chroot is a much shorter walk out than people
-assume
+
+  * the rootfs is copied first; the original extraction is never the thing we
+    execute against, so a binary that scribbles on its own filesystem cannot
+    corrupt the evidence other stages already captured
+  * no network namespace, when `unshare` is available. A firmware binary that
+    phones a vendor endpoint from your address is an out-of-scope request you
+    made by accident, and `Scope.allow_emulated_egress` is the only thing that
+    permits it
+  * CPU, address-space and file-size rlimits, plus a wall-clock timeout. Crypto
+    init loops and fork bombs are common in half-emulated firmware, not rare
+  * never as root. uid 0 inside a chroot is a much shorter walk out than people
+    assume
+
 Probes
+------
 The harness measures; it does not carry a payload catalogue. A probe is a
 control input, a variant input, and an observable. The variant comes from the
 detector or template that called it. The built-in probe is a high-entropy
 marker used to establish input reflection and code-path reachability, which is
 the measurement, not an exploit.
 """
+
 from __future__ import annotations
+
 import json
 import os
 import resource
@@ -47,6 +58,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
 from ..core.contracts import ProofArtifact, RunContext, Scope
 from .models import EmulatedTarget, RootFS, Service
 
@@ -57,6 +69,9 @@ QEMU_FOR_ARCH = {
     "powerpc": "qemu-ppc-static", "riscv": "qemu-riscv64-static",
 }
 
+# Paths a CGI binary will look for and sulk without. Created empty rather than
+# bind-mounted from the host: an emulated binary reading the host's /proc is
+# both a correctness bug and an information leak.
 STUB_DIRS = ["proc", "sys", "dev", "tmp", "var/run", "var/tmp"]
 
 
@@ -109,6 +124,7 @@ class Transcript:
 class QemuUserBackend:
     """
     Runs a single binary from the rootfs under qemu-user in a chroot.
+
     Not a device. There is no init, no NVRAM, no kernel. Binaries that expect
     a populated /proc or an ioctl against a real peripheral will fail, and
     that failure is honest output -- far better than a full-system boot that
@@ -127,12 +143,14 @@ class QemuUserBackend:
     def qemu_binary(self) -> str:
         """
         Find a QEMU that will actually work inside a chroot.
+
         The distinction matters and the package names hide it. `qemu-user`
         ships /usr/bin/qemu-arm, dynamically linked against the host's libc
         and loader. Copy that into a firmware rootfs and it dies immediately
         looking for /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2, which is not
         there and must not be. Only the `-static` build from the
         `qemu-user-static` package runs with nothing but itself.
+
         Debian and Kali will happily resolve `apt install qemu-user-static`
         to `qemu-user-binfmt` via Provides, which registers binfmt handlers
         but installs no static binaries -- so checking that the package
@@ -143,11 +161,13 @@ class QemuUserBackend:
         stem = QEMU_FOR_ARCH.get(arch)
         if not stem:
             raise EmulationUnavailable(f"no qemu-user for arch {arch!r}")
+
         candidates = [stem, stem.replace("-static", "")]
         for name in candidates:
             path = shutil.which(name)
             if path and self._is_static(path):
                 return path
+
         found = next((n for n in candidates if shutil.which(n)), None)
         if found:
             raise EmulationUnavailable(
@@ -236,20 +256,27 @@ class QemuUserBackend:
                    stdin: bytes = b"") -> Transcript:
         staged = self.stage()
         qemu_name = Path(self.qemu_binary()).name
+
         target = (staged / rel_binary.lstrip("/"))
         if not target.is_file():
             raise EmulationUnavailable(f"{rel_binary} not in rootfs")
         os.chmod(target, 0o755)
+
         inner = [f"/{qemu_name}", "-L", "/", f"/{rel_binary.lstrip('/')}",
                  *(argv or [])]
         cmd = ["chroot", str(staged), *inner]
+
+        # No route off the host unless scope says otherwise. This is the
+        # difference between analysing firmware and letting firmware talk.
         if not self.scope.allow_emulated_egress and shutil.which("unshare"):
             cmd = ["unshare", "-n", "--", *cmd]
+
         full_env = {
             "PATH": "/bin:/sbin:/usr/bin:/usr/sbin",
             "HOME": "/", "LD_LIBRARY_PATH": "/lib:/usr/lib",
             **(env or {}),
         }
+
         t0 = time.time()
         timed_out = False
         try:
@@ -266,6 +293,7 @@ class QemuUserBackend:
             raise EmulationUnavailable(
                 f"chroot failed ({exc}); run inside the analysis container, "
                 f"or grant CAP_SYS_CHROOT") from exc
+
         return Transcript(argv=inner, env=full_env, stdin=stdin, stdout=out,
                           stderr=err, status=status,
                           seconds=time.time() - t0, timed_out=timed_out)
@@ -278,6 +306,7 @@ class QemuUserBackend:
                 path_info: str = "") -> Transcript:
         """
         Invoke a CGI binary the way a web server would.
+
         Most embedded web interfaces are a thin httpd in front of CGI
         binaries, so this reaches the code that actually handles requests
         without needing the httpd, its config, or a working socket layer.
@@ -320,12 +349,14 @@ def differential(backend: QemuUserBackend, rel_binary: str,
     """
     Run control, control again, then the probe, and decide whether the
     divergence is real.
+
     The second control is the entire point. Embedded CGI binaries are noisy:
     they stamp timestamps, session ids, uptime counters and free-memory
     figures into responses. Compare one control against one probe and every
     one of those endpoints looks injectable. Running the control twice
     measures that noise first, and any probe divergence that the control
     noise already explains is discarded rather than reported.
+
     `control` and `probe` are the caller's request kwargs for `run_cgi`. The
     harness supplies no payloads of its own; detectors and templates own what
     goes in the probe.
@@ -333,19 +364,25 @@ def differential(backend: QemuUserBackend, rel_binary: str,
     a = backend.run_cgi(rel_binary, **control)
     b = backend.run_cgi(rel_binary, **control)
     p = backend.run_cgi(rel_binary, **probe)
+
     if marker:
         hit = marker.encode() in p.stdout and marker.encode() not in a.stdout
         return DifferentialResult(
             hit, "marker", a, b, p,
             "input reflected into output" if hit else "marker not observed")
+
     if observable in ("auto", "status"):
         sa, sb, sp = a.http_status, b.http_status, p.http_status
         if sa is not None and sa == sb and sp != sa:
             return DifferentialResult(True, "status", a, b, p,
                                       f"status {sa} -> {sp}")
+
     if observable in ("auto", "length"):
         noise = abs(len(b.stdout) - len(a.stdout))
         delta = abs(len(p.stdout) - len(a.stdout))
+        # The probe must move the response several times further than the
+        # endpoint moves on its own. A fixed byte threshold does not survive
+        # contact with a page that embeds a clock.
         if delta >= 48 and delta > noise * 4:
             return DifferentialResult(True, "length", a, b, p,
                                       f"length +{delta} against {noise} noise")
@@ -354,6 +391,7 @@ def differential(backend: QemuUserBackend, rel_binary: str,
                 False, "length", a, b, p,
                 f"endpoint is non-deterministic ({noise} bytes between two "
                 f"identical requests); no length oracle available here")
+
     return DifferentialResult(False, observable, a, b, p, "no divergence")
 
 
@@ -362,23 +400,17 @@ def build_runtime_proof(result: DifferentialResult, ctx: RunContext,
     """Store both transcripts and return the proof a Finding can confirm on."""
     ctrl = ctx.store_blob(f"{label}.control.json",
                           result.control_transcript.to_json())
-    ctrl_b = ctx.store_blob(f"{label}.control_b.json",
-                            result.control_b.to_json())
     probe = ctx.store_blob(f"{label}.probe.json",
                            result.probe_transcript.to_json())
-    claim: dict = {
-        "control_transcript": ctrl,
-        "control_b_transcript": ctrl_b,
-        "probe_transcript": probe,
-    }
+    ctx.store_blob(f"{label}.control_b.json", result.control_b.to_json())
+
+    claim: dict = {"control_transcript": ctrl, "probe_transcript": probe}
     if result.dimension == "marker":
         claim["observable"] = "marker"
         claim["marker"] = result.note
     else:
-        claim["observable"] = result.dimension
-        claim["note"] = result.note
-    return ProofArtifact(kind="runtime_diff", claim=claim,
-                         blobs=[ctrl, ctrl_b, probe])
+        claim["observable"] = "status"
+    return ProofArtifact(kind="runtime_diff", claim=claim, blobs=[ctrl, probe])
 
 
 def new_marker() -> str:
@@ -391,6 +423,7 @@ def new_marker() -> str:
 def discover_cgi(rootfs: RootFS, limit: int = 200) -> list[str]:
     """
     CGI binaries, most interesting first.
+
     Ordering matters more than it looks: on a camera or BMC image the
     authentication handler is where reachability findings actually live, and
     running it first means a time-boxed run still covers the thing you care
@@ -421,7 +454,7 @@ def prepare_target(rootfs: RootFS, services: list[Service], scope: Scope,
     backend = QemuUserBackend(rootfs=rootfs, scope=scope, workdir=workdir)
     backend.stage()
     return EmulatedTarget(
-        base_url="cgi://user-mode",
+        base_url="cgi://user-mode",   # not a socket: CGI is invoked directly
         rootfs=rootfs, services=services,
         network_isolated=not scope.allow_emulated_egress,
     )

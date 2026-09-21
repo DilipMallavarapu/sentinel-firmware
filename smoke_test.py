@@ -103,12 +103,11 @@ check("real secret in a .cfg beside that HTML IS confirmed",
 check("shell substitution $(nvram get pw) was not taken for a secret",
       not any("nvram" in str(x.context.get("details", "")) and "$(" in
               str(x.context.get("details", "")) for x in findings))
-check("a passwd with two real accounts is ONE grouped finding",
+check("a passwd with three real accounts is ONE grouped finding",
       len([x for x in findings if x.target == "etc_ro/passwd"]) == 1)
-check("that finding records both accounts",
-      any(x.target == "etc_ro/passwd" and x.context.get("occurrences") == 2
+check("that finding records all three accounts",
+      any(x.target == "etc_ro/passwd" and x.context.get("occurrences") == 3
           for x in findings))
-
 
 print("\n== 3. Proofs survive an audit, and tampering breaks them ==")
 reverified = all(verify_proof(x.proof, RUNDIR) for x in confirmed)

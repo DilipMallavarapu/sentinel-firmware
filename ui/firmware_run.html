@@ -1,269 +1,365 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="bg-gray-950 text-gray-200 font-sans">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Sentinel — firmware run</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;450;600&display=swap" rel="stylesheet">
-<style>
-  :root{
-    --paper:#E9ECE6; --paper-2:#DFE3DB; --rule:#C2C9BE;
-    --ink:#1B2621; --ink-soft:#5A6560;
-    --signal:#B06A12;      /* running / in flight */
-    --oxide:#9A3B2A;       /* confirmed, high severity */
-    --slate:#46607A;       /* probable */
-    --moss:#4A6B3F;        /* verified proof */
-    --sans:"IBM Plex Sans",system-ui,sans-serif;
-    --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
-    box-sizing:border-box;
-    padding-top:env(safe-area-inset-top,0px);
-    padding-bottom:env(safe-area-inset-bottom,0px);
-  }
-  @media (prefers-color-scheme:dark){
-    :root:not([data-theme="light"]){
-      --paper:#171A16; --paper-2:#1F241E; --rule:#333B31;
-      --ink:#DDE3D8; --ink-soft:#8D998A;
-      --signal:#D89A45; --oxide:#D2705C; --slate:#83A6C4; --moss:#8FB77F;
-    }
-  }
-  *,*::before,*::after{box-sizing:inherit}
-  html{scroll-padding-top:env(safe-area-inset-top,0px)}
-  body{margin:0;background:var(--paper);color:var(--ink);
-       font:450 15px/1.55 var(--sans);-webkit-font-smoothing:antialiased}
-  .wrap{max-width:1180px;margin:0 auto;padding:clamp(20px,4vw,48px)}
-
-  /* ---- masthead: the image fingerprint is the subject of the page ---- */
-  header{border-bottom:2px solid var(--ink);padding-bottom:22px}
-  .eyebrow{font:500 12px/1 var(--mono);color:var(--ink-soft);
-           letter-spacing:.02em;margin:0 0 14px}
-  .digest{font:600 clamp(19px,4.4vw,38px)/1.18 var(--mono);
-          margin:0;word-break:break-all;letter-spacing:-.015em}
-  .digest .lo{color:var(--ink-soft);font-weight:400}
-  .facts{display:flex;flex-wrap:wrap;gap:6px 30px;margin:18px 0 0;padding:0;
-         list-style:none;font:400 13.5px/1.4 var(--mono);color:var(--ink-soft)}
-  .facts b{font-weight:600;color:var(--ink)}
-
-  /* ---- two-column body ---- */
-  .cols{display:grid;grid-template-columns:minmax(0,340px) minmax(0,1fr);
-        gap:clamp(24px,4vw,56px);margin-top:34px;align-items:start}
-  @media (max-width:820px){.cols{grid-template-columns:1fr}}
-  h2{font:600 14px/1 var(--sans);margin:0 0 16px;color:var(--ink-soft)}
-
-  /* ---- checkpoint chain, drawn as a signal trace ---- */
-  .chain{list-style:none;margin:0;padding:0;position:relative}
-  .chain::before{content:"";position:absolute;left:7px;top:10px;bottom:14px;
-                 width:2px;background:var(--rule)}
-  .node{position:relative;padding:0 0 18px 30px}
-  .dot{position:absolute;left:0;top:4px;width:16px;height:16px;border-radius:50%;
-       border:2px solid var(--rule);background:var(--paper)}
-  .node[data-state="ok"] .dot,.node[data-state="cached"] .dot{
-       border-color:var(--moss);background:var(--moss)}
-  .node[data-state="running"] .dot{border-color:var(--signal);background:var(--paper)}
-  .node[data-state="failed"] .dot{border-color:var(--oxide);background:var(--oxide)}
-  .node[data-state="blocked"] .dot,.node[data-state="skipped"] .dot{
-       border-style:dashed}
-  .node[data-state="running"] .dot::after{content:"";position:absolute;
-       inset:2px;border-radius:50%;background:var(--signal);
-       animation:pulse 1.15s ease-in-out infinite}
-  @keyframes pulse{0%,100%{opacity:.25;transform:scale(.55)}50%{opacity:1;transform:scale(1)}}
-  @media (prefers-reduced-motion:reduce){.node .dot::after{animation:none;opacity:.8}}
-  .node h3{font:450 15px/1.35 var(--sans);margin:0}
-  .node[data-state="pending"] h3,.node[data-state="skipped"] h3{color:var(--ink-soft)}
-  .node p{margin:3px 0 0;font:400 12.5px/1.45 var(--mono);color:var(--ink-soft)}
-  .node[data-state="failed"] p{color:var(--oxide)}
-  .tally{float:right;font:600 12.5px/1 var(--mono);color:var(--ink-soft)}
-
-  /* ---- findings ledger, grouped by what we can actually prove ---- */
-  .tier{margin:0 0 30px}
-  .tier-head{display:flex;align-items:baseline;gap:12px;
-             border-bottom:1px solid var(--rule);padding-bottom:7px;margin-bottom:4px}
-  .tier-head h3{font:600 15px/1 var(--sans);margin:0}
-  .tier-head span{font:400 12.5px/1 var(--mono);color:var(--ink-soft)}
-  .tier-note{margin:8px 0 12px;font:400 13px/1.5 var(--sans);color:var(--ink-soft);
-             max-width:62ch}
-  .f{display:grid;grid-template-columns:auto minmax(0,1fr);gap:0 14px;
-     padding:11px 0;border-bottom:1px solid var(--rule)}
-  .sev{font:600 11.5px/1.5 var(--mono);padding-top:2px;width:64px}
-  .sev[data-s="critical"],.sev[data-s="high"]{color:var(--oxide)}
-  .sev[data-s="medium"]{color:var(--signal)}
-  .sev[data-s="low"],.sev[data-s="info"]{color:var(--ink-soft)}
-  .f-title{font:450 14.5px/1.4 var(--sans);margin:0}
-  .f-loc{grid-column:2;margin:4px 0 0;font:400 12.5px/1.45 var(--mono);
-         color:var(--ink-soft);word-break:break-all}
-  .stamp{display:inline-block;margin-left:8px;padding:1px 6px;border-radius:2px;
-         font:500 11px/1.5 var(--mono);border:1px solid var(--moss);color:var(--moss)}
-  .axis{color:var(--slate)}
-
-  .empty{padding:26px 0;color:var(--ink-soft);font-size:14px;max-width:58ch}
-  footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);
-         font:400 12.5px/1.6 var(--mono);color:var(--ink-soft)}
-  .live{display:inline-flex;align-items:center;gap:7px}
-  .live i{width:7px;height:7px;border-radius:50%;background:var(--ink-soft)}
-  .live[data-on="1"] i{background:var(--moss)}
-  a{color:inherit}
-  :focus-visible{outline:2px solid var(--signal);outline-offset:2px}
-</style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sentinel — Firmware Analysis</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.13.3/dist/cdn.min.js"></script>
+    <style>
+        .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+        .dag-node { transition: all 0.3s ease; }
+        .dag-active { @apply bg-blue-600 text-white shadow-lg shadow-blue-500/50 scale-110; }
+        .dag-done { @apply bg-green-700 text-green-100; }
+        .dag-fail { @apply bg-red-700 text-red-100; }
+        .dag-skip { @apply bg-gray-700 text-gray-400; }
+        .finding-card { transition: all 0.2s ease; }
+        .finding-card:hover { @apply border-gray-600; }
+        .proof-block { @apply bg-black/50 border border-gray-800 rounded p-3 mono text-xs overflow-x-auto; }
+        .pulse-dot { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: .5; }
+        }
+    </style>
 </head>
-<body>
-<div class="wrap">
+<body class="p-6 max-w-7xl mx-auto" x-data="sentinelApp()">
 
-  <header>
-    <p class="eyebrow" id="auth">authorization pending</p>
-    <h1 class="digest" id="digest">awaiting image<span class="lo"></span></h1>
-    <ul class="facts" id="facts"></ul>
-  </header>
+    <!-- Header -->
+    <header class="flex justify-between items-center mb-8 border-b border-gray-800 pb-4">
+        <div>
+            <h1 class="text-3xl font-bold text-white">Sentinel <span class="text-blue-500">Firmware Lane</span></h1>
+            <p class="text-gray-500 mono text-sm mt-1">
+                Status: <span class="text-gray-300" x-text="status"></span>
+            </p>
+        </div>
+        <button @click="showScanForm = !showScanForm" 
+                class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded font-medium transition">
+            New Scan
+        </button>
+    </header>
 
-  <div class="cols">
-    <section aria-labelledby="ch-h">
-      <h2 id="ch-h">Checkpoints</h2>
-      <ol class="chain" id="chain">
-        <li class="empty">Start a run to populate the chain.</li>
-      </ol>
+    <!-- Scan Form Modal -->
+    <div x-show="showScanForm" x-transition class="fixed inset-0 bg-black/70 flex items-center justify-center z-50" @click.self="showScanForm = false">
+        <div class="bg-gray-900 rounded-lg p-6 max-w-2xl w-full mx-4 border border-gray-700">
+            <h2 class="text-xl font-bold text-white mb-4">Start New Firmware Scan</h2>
+            <form @submit.prevent="startScan">
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">Firmware Image Path</label>
+                        <input type="text" x-model="scanForm.imagePath" required
+                               class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white mono text-sm"
+                               placeholder="/path/to/firmware.bin">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">Authorization Reference</label>
+                        <input type="text" x-model="scanForm.scopeRef" required
+                               class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white mono text-sm"
+                               placeholder="LOCAL-TEST-001">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">Firmware SHA256 (optional, for scope validation)</label>
+                        <input type="text" x-model="scanForm.firmwareSha256"
+                               class="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white mono text-sm"
+                               placeholder="Leave empty to scan any image">
+                    </div>
+                </div>
+                <div class="flex gap-3 mt-6">
+                    <button type="submit" :disabled="scanning"
+                            class="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 rounded font-medium transition">
+                        <span x-show="!scanning">Start Scan</span>
+                        <span x-show="scanning">Scanning...</span>
+                    </button>
+                    <button type="button" @click="showScanForm = false"
+                            class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded font-medium transition">
+                        Cancel
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Pipeline DAG -->
+    <section class="mb-8">
+        <h2 class="text-xl font-semibold mb-4 text-gray-300">Pipeline Checkpoints</h2>
+        <div class="flex flex-wrap gap-3">
+            <template x-for="stage in stages" :key="stage">
+                <div class="dag-node px-4 py-2 rounded-lg border border-gray-700 bg-gray-800 text-sm font-medium"
+                     :class="{
+                        'dag-active': activeStage === stage,
+                        'dag-done': checkpoints[stage] === 'done',
+                        'dag-fail': checkpoints[stage] === 'fail',
+                        'dag-skip': checkpoints[stage] === 'skip'
+                     }">
+                    <span x-text="stage"></span>
+                    <span x-show="checkpoints[stage] === 'done'" class="ml-2">✓</span>
+                    <span x-show="checkpoints[stage] === 'fail'" class="ml-2">✗</span>
+                    <span x-show="checkpoints[stage] === 'skip'" class="ml-2">⊘</span>
+                    <span x-show="activeStage === stage" class="ml-2 pulse-dot">●</span>
+                </div>
+            </template>
+        </div>
     </section>
 
-    <section aria-labelledby="fd-h">
-      <h2 id="fd-h">Findings</h2>
-      <div id="tiers"></div>
+    <!-- Findings Triage -->
+    <section class="mb-8">
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="text-xl font-semibold text-gray-300">
+                Findings <span class="text-gray-500 text-sm" x-text="`(${filteredFindings.length}/${findings.length})`"></span>
+            </h2>
+            <div class="flex gap-2">
+                <button @click="filter = 'all'" 
+                        :class="filter === 'all' ? 'bg-blue-600' : 'bg-gray-800'" 
+                        class="px-3 py-1 rounded text-sm hover:bg-blue-700 transition">
+                    All
+                </button>
+                <button @click="filter = 'confirmed'" 
+                        :class="filter === 'confirmed' ? 'bg-red-600' : 'bg-gray-800'" 
+                        class="px-3 py-1 rounded text-sm hover:bg-red-700 transition">
+                    Confirmed
+                </button>
+                <button @click="filter = 'probable'" 
+                        :class="filter === 'probable' ? 'bg-yellow-600' : 'bg-gray-800'" 
+                        class="px-3 py-1 rounded text-sm hover:bg-yellow-700 transition">
+                    Probable
+                </button>
+                <button @click="filter = 'candidate'" 
+                        :class="filter === 'candidate' ? 'bg-gray-600' : 'bg-gray-800'" 
+                        class="px-3 py-1 rounded text-sm hover:bg-gray-700 transition">
+                    Candidate
+                </button>
+            </div>
+        </div>
+
+        <div class="space-y-3">
+            <template x-for="f in filteredFindings" :key="f.id">
+                <div class="finding-card bg-gray-900 border border-gray-800 rounded-lg p-4" 
+                     @click="f.expanded = !f.expanded">
+                    <div class="flex justify-between items-start cursor-pointer">
+                        <div class="flex-1">
+                            <div class="flex items-center gap-2 mb-2">
+                                <span class="px-2 py-0.5 rounded text-xs font-bold" 
+                                      :class="{
+                                          'bg-red-900 text-red-200': f.confidence === 'confirmed',
+                                          'bg-yellow-900 text-yellow-200': f.confidence === 'probable',
+                                          'bg-gray-700 text-gray-300': f.confidence === 'candidate'
+                                      }" 
+                                      x-text="f.confidence"></span>
+                                <span class="px-2 py-0.5 rounded text-xs font-medium bg-blue-900/50 text-blue-200" 
+                                      x-text="f.axis"></span>
+                                <span class="px-2 py-0.5 rounded text-xs font-medium" 
+                                      :class="{
+                                          'bg-red-800 text-red-100': f.severity === 'critical',
+                                          'bg-orange-800 text-orange-100': f.severity === 'high',
+                                          'bg-yellow-800 text-yellow-100': f.severity === 'medium',
+                                          'bg-blue-800 text-blue-100': f.severity === 'low',
+                                          'bg-gray-700 text-gray-300': f.severity === 'info'
+                                      }" 
+                                      x-text="f.severity"></span>
+                            </div>
+                            <h3 class="font-semibold text-white" x-text="f.title"></h3>
+                            <p class="text-gray-400 text-sm mt-2" x-text="f.summary"></p>
+                        </div>
+                        <div class="text-right ml-4">
+                            <span class="mono text-xs text-gray-500" x-text="f.target"></span>
+                            <div class="text-gray-600 text-xs mt-1" x-text="f.expanded ? '▲ Collapse' : '▼ Expand'"></div>
+                        </div>
+                    </div>
+                    
+                    <!-- Expanded Details -->
+                    <div x-show="f.expanded" class="mt-4 space-y-3" @click.stop>
+                        <div x-show="f.context && Object.keys(f.context).length > 0">
+                            <h4 class="text-sm font-semibold text-gray-400 mb-2">Context</h4>
+                            <pre class="proof-block" x-text="JSON.stringify(f.context, null, 2)"></pre>
+                        </div>
+                        
+                        <div x-show="f.proof">
+                            <h4 class="text-sm font-semibold text-gray-400 mb-2">
+                                <span class="text-green-500">[VERIFIER]</span> Proof Artifact
+                            </h4>
+                            <div class="proof-block">
+                                <div class="mb-2">
+                                    <span class="text-gray-500">Kind:</span> 
+                                    <span class="text-gray-300" x-text="f.proof.kind"></span>
+                                </div>
+                                <details class="mt-2">
+                                    <summary class="cursor-pointer text-gray-500 hover:text-gray-300">
+                                        Claim Details
+                                    </summary>
+                                    <pre class="mt-2 text-gray-400" x-text="JSON.stringify(f.proof.claim, null, 2)"></pre>
+                                </details>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </template>
+            
+            <div x-show="filteredFindings.length === 0" class="text-center text-gray-600 py-10">
+                No findings match the current filter.
+            </div>
+        </div>
     </section>
-  </div>
 
-  <footer>
-    <span class="live" id="live" data-on="0"><i></i><span id="live-t">not connected</span></span>
-    · run <span id="runid">—</span>
-  </footer>
-</div>
+    <!-- Completed Runs -->
+    <section>
+        <h2 class="text-xl font-semibold mb-4 text-gray-300">Completed Runs</h2>
+        <div class="space-y-2">
+            <template x-for="run in runs" :key="run.run_id">
+                <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-600 transition cursor-pointer"
+                     @click="loadReport(run.run_id)">
+                    <div class="flex justify-between items-center">
+                        <div>
+                            <span class="font-medium text-white" x-text="run.run_id"></span>
+                            <span class="text-gray-500 text-sm ml-3" x-text="run.authorization"></span>
+                        </div>
+                        <div class="text-right">
+                            <div class="text-gray-400 text-sm">
+                                <span x-text="run.findings_count"></span> findings
+                            </div>
+                            <div class="text-gray-600 text-xs mono" x-text="new Date(run.timestamp * 1000).toLocaleString()"></div>
+                        </div>
+                    </div>
+                </div>
+            </template>
+            <div x-show="runs.length === 0" class="text-center text-gray-600 py-10">
+                No completed runs yet.
+            </div>
+        </div>
+    </section>
 
-<script>
-(() => {
-  const TIERS = [
-    ["confirmed", "Confirmed",
-     "Each of these carries a stored proof that was re-checked offline just now. If a proof stops verifying, the finding leaves this list."],
-    ["probable", "Probable",
-     "Several independent signals agree, but nothing here has a re-checkable oracle. Read before you cite."],
-    ["candidate", "Candidate",
-     "One weak signal. Version matches live here: knowing a binary reports a version is not knowing the device is vulnerable."],
-    ["refuted", "Refuted",
-     "Disproved on revalidation. Kept so the heuristics can be tuned against them."],
-  ];
+    <script>
+        function sentinelApp() {
+            return {
+                status: 'idle',
+                activeStage: '',
+                checkpoints: {},
+                findings: [],
+                filter: 'all',
+                runs: [],
+                showScanForm: false,
+                scanning: false,
+                scanForm: {
+                    imagePath: '',
+                    scopeRef: 'LOCAL-TEST',
+                    firmwareSha256: ''
+                },
+                stages: [
+                    'acquire', 'unpack', 'rootfs', 'services', 'secrets', 
+                    'backdoor', 'binanalysis', 'elfscan', 'emulate', 
+                    'reachability', 'webscan', 'triage', 'report'
+                ],
+                
+                get filteredFindings() {
+                    if (this.filter === 'all') return this.findings;
+                    return this.findings.filter(f => f.confidence === this.filter);
+                },
 
-  const $ = s => document.querySelector(s);
-  const state = { plan: [], findings: [], meta: {} };
+                init() {
+                    this.connectSSE();
+                    this.loadRuns();
+                },
 
-  const esc = s => String(s ?? "").replace(/[&<>"]/g,
-    c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+                connectSSE() {
+                    const evtSource = new EventSource('/sse');
+                    evtSource.onmessage = (event) => {
+                        const data = JSON.parse(event.data);
+                        this.handleSSEEvent(data);
+                    };
+                    evtSource.onerror = () => {
+                        console.log('SSE connection lost, reconnecting...');
+                        setTimeout(() => this.connectSSE(), 3000);
+                    };
+                },
 
-  function renderHeader() {
-    const m = state.meta;
-    if (m.sha256) {
-      $("#digest").innerHTML =
-        esc(m.sha256.slice(0,32)) + '<span class="lo">' + esc(m.sha256.slice(32)) + "</span>";
-    }
-    if (m.authorization) $("#auth").textContent = "authorized under " + m.authorization;
-    const facts = [
-      ["arch", m.arch], ["libc", m.libc], ["init", m.init],
-      ["files", m.files && m.files.toLocaleString()],
-      ["size", m.size && (m.size/1e6).toFixed(1) + " MB"],
-    ].filter(([,v]) => v);
-    $("#facts").innerHTML = facts.map(([k,v]) =>
-      `<li>${esc(k)} <b>${esc(v)}</b></li>`).join("");
-    $("#runid").textContent = m.run_id || "—";
-  }
+                handleSSEEvent(data) {
+                    if (data.type === 'checkpoint.state') {
+                        const state = data.state;
+                        if (state === 'running') {
+                            this.activeStage = data.id;
+                            this.status = 'scanning';
+                        } else if (state === 'ok' || state === 'cached') {
+                            this.checkpoints[data.id] = 'done';
+                            this.activeStage = '';
+                        } else if (state === 'failed') {
+                            this.checkpoints[data.id] = 'fail';
+                            this.activeStage = '';
+                        } else if (state === 'skipped') {
+                            this.checkpoints[data.id] = 'skip';
+                        }
+                    } else if (data.type === 'finding') {
+                        const finding = {
+                            ...data,
+                            expanded: false
+                        };
+                        this.findings.push(finding);
+                    } else if (data.type === 'run.complete') {
+                        this.status = 'completed';
+                        this.activeStage = '';
+                        this.scanning = false;
+                        this.showScanForm = false;
+                        this.loadRuns();
+                    } else if (data.type === 'run.error') {
+                        this.status = 'failed';
+                        this.scanning = false;
+                        alert('Scan failed: ' + data.error);
+                    }
+                },
 
-  function renderChain() {
-    const el = $("#chain");
-    if (!state.plan.length) return;
-    el.innerHTML = state.plan.map(n => {
-      const tally = n.findings ? `<span class="tally">${n.findings}</span>` : "";
-      const note = n.note || ({
-        pending: "queued", running: "working…", blocked: "upstream failed",
-        skipped: "not applicable", cached: "unchanged since last run",
-      })[n.state] || "";
-      const time = n.elapsed != null ? ` · ${n.elapsed}s` : "";
-      return `<li class="node" data-state="${esc(n.state)}">
-        <span class="dot"></span>${tally}
-        <h3>${esc(n.label || n.id)}</h3>
-        <p>${esc(note)}${esc(time)}</p></li>`;
-    }).join("");
-  }
+                async startScan() {
+                    this.scanning = true;
+                    this.status = 'starting';
+                    this.findings = [];
+                    this.checkpoints = {};
+                    this.activeStage = '';
+                    
+                    try {
+                        const response = await fetch('/api/scan', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                image_path: this.scanForm.imagePath,
+                                scope_ref: this.scanForm.scopeRef,
+                                firmware_sha256: this.scanForm.firmwareSha256 ? [this.scanForm.firmwareSha256] : null
+                            })
+                        });
+                        
+                        if (!response.ok) {
+                            throw new Error('Failed to start scan');
+                        }
+                        
+                        const result = await response.json();
+                        console.log('Scan started:', result);
+                    } catch (error) {
+                        this.scanning = false;
+                        this.status = 'error';
+                        alert('Error starting scan: ' + error.message);
+                    }
+                },
 
-  function renderFindings() {
-    const host = $("#tiers");
-    if (!state.findings.length) {
-      host.innerHTML = `<p class="empty">No findings yet. Confirmed findings
-        appear the moment a detector captures a proof that verifies.</p>`;
-      return;
-    }
-    const order = { critical:0, high:1, medium:2, low:3, info:4 };
-    host.innerHTML = TIERS.map(([key, label, note]) => {
-      const rows = state.findings
-        .filter(f => f.confidence === key)
-        .sort((a,b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9));
-      if (!rows.length) return "";
-      return `<section class="tier">
-        <div class="tier-head"><h3>${label}</h3><span>${rows.length}</span></div>
-        <p class="tier-note">${note}</p>
-        ${rows.map(f => `<article class="f">
-          <span class="sev" data-s="${esc(f.severity)}">${esc(f.severity)}</span>
-          <p class="f-title">${esc(f.title)}${
-            f.proof ? '<span class="stamp">proof ok</span>' : ""}</p>
-          <p class="f-loc">${esc(f.target)}
-            <span class="axis">· ${esc(f.axis)}</span>${
-            f.cwe ? " · " + esc(f.cwe) : ""}</p>
-        </article>`).join("")}
-      </section>`;
-    }).join("");
-  }
+                async loadRuns() {
+                    try {
+                        const response = await fetch('/api/runs');
+                        this.runs = await response.json();
+                    } catch (error) {
+                        console.error('Failed to load runs:', error);
+                    }
+                },
 
-  function upsertNode(patch) {
-    const n = state.plan.find(x => x.id === patch.id);
-    if (n) Object.assign(n, patch); else state.plan.push(patch);
-    renderChain();
-  }
-
-  const handlers = {
-    "run.start": d => {
-      state.plan = d.plan || [];
-      state.meta.run_id = d.run_id;
-      renderHeader(); renderChain();
-    },
-    "checkpoint.state": upsertNode,
-    "checkpoint.progress": d => upsertNode({ id: d.id,
-      note: `${(d.scanned||0).toLocaleString()} scanned` }),
-    "finding": d => { state.findings.push(d); renderFindings(); },
-    "run.end": d => {
-      Object.assign(state.meta, d);
-      $("#live-t").textContent = "run finished";
-      renderHeader();
-    },
-    "meta": d => { Object.assign(state.meta, d); renderHeader(); },
-  };
-
-  // The Python side emits these over sentinel.server's SSE endpoint.
-  const params = new URLSearchParams(location.search);
-  const url = params.get("stream") || "/stream";
-  let src;
-  try { src = new EventSource(url); } catch (e) { src = null; }
-
-  if (src) {
-    src.onopen = () => {
-      $("#live").dataset.on = "1";
-      $("#live-t").textContent = "connected";
-    };
-    src.onerror = () => {
-      $("#live").dataset.on = "0";
-      $("#live-t").textContent = "stream unavailable — showing last state";
-    };
-    for (const [name, fn] of Object.entries(handlers)) {
-      src.addEventListener(name, ev => {
-        try { fn(JSON.parse(ev.data)); } catch (e) { /* malformed frame */ }
-      });
-    }
-  }
-
-  renderHeader(); renderFindings();
-})();
-</script>
+                async loadReport(runId) {
+                    try {
+                        const response = await fetch(`/runs/${runId}/report.json`);
+                        const report = await response.json();
+                        this.findings = report.findings.map(f => ({
+                            ...f,
+                            expanded: false
+                        }));
+                        this.status = `viewing ${runId}`;
+                    } catch (error) {
+                        alert('Failed to load report: ' + error.message);
+                    }
+                }
+            }
+        }
+    </script>
 </body>
 </html>

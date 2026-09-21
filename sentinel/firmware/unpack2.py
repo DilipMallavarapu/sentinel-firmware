@@ -1,23 +1,31 @@
 """
 sentinel.firmware.unpack
+2========================
+
 Extraction and rootfs identification.
+
 Order of preference: unblob (best recursive extraction, structured JSON
 report), then binwalk -Me, then a magic-scan fallback that carves known
 container headers directly. Whichever runs, the output is normalised to the
 same `Partition` list so downstream stages never learn which tool won.
+
 Two things this stage must get right, because everything after depends on it:
-Finding the real rootfs. A binwalk run on a vendor image typically
-produces a dozen candidate directories, most of them fragments. Picking
-wrong means every later analyzer reports nothing and the run looks clean
-when it is actually blind. We score candidates on filesystem-shape
-evidence rather than trusting extraction order.
-Flagging encryption instead of silently producing nothing. A vendor image
-with a high-entropy unidentified blob is a finding in itself (and a signal
-the researcher needs the key from a bootloader dump). An analyzer that
-returns zero findings on an encrypted image is the worst possible false
-negative, so we surface it loudly.
+
+1. Finding the *real* rootfs. A binwalk run on a vendor image typically
+   produces a dozen candidate directories, most of them fragments. Picking
+   wrong means every later analyzer reports nothing and the run looks clean
+   when it is actually blind. We score candidates on filesystem-shape
+   evidence rather than trusting extraction order.
+
+2. Flagging encryption instead of silently producing nothing. A vendor image
+   with a high-entropy unidentified blob is a finding in itself (and a signal
+   the researcher needs the key from a bootloader dump). An analyzer that
+   returns zero findings on an encrypted image is the worst possible false
+   negative, so we surface it loudly.
 """
+
 from __future__ import annotations
+
 import json
 import math
 import re
@@ -25,8 +33,10 @@ import shutil
 import subprocess
 from collections import Counter
 from pathlib import Path
+
 from .models import FirmwareImage, Partition, RootFS
 
+# Containers we recognise in the fallback carver.
 MAGICS: list[tuple[bytes, str]] = [
     (b"hsqs", "squashfs"), (b"sqsh", "squashfs"),
     (b"\x73\x71\x73\x68", "squashfs"),
@@ -64,6 +74,7 @@ def extract(image: FirmwareImage, workdir: Path,
             timeout: int = 1800) -> tuple[list[Partition], str]:
     """Run the best available extractor. Returns (partitions, tool_used)."""
     workdir.mkdir(parents=True, exist_ok=True)
+
     if _have("unblob"):
         parts = _unblob(image, workdir, timeout)
         if parts:
@@ -88,7 +99,7 @@ def _unblob(image: FirmwareImage, workdir: Path, timeout: int) -> list[Partition
     if report.is_file():
         try:
             for i, rec in enumerate(json.loads(report.read_text())):
-                if rec.get("typename") not in ("ChunkReport", "Chunk"):
+                if rec.get("__typename__") not in ("ChunkReport", "Chunk"):
                     continue
                 parts.append(Partition(
                     index=i,
@@ -122,9 +133,9 @@ def _binwalk(image: FirmwareImage, workdir: Path, timeout: int) -> list[Partitio
         desc = m.group(2).strip()
         kind = "unknown"
         for key in ("squashfs", "cramfs", "jffs2", "ubi", "uimage",
-                     "gzip", "xz", "lzma", "device tree"):
+                    "gzip", "xz", "lzma", "device tree"):
             if key in desc.lower():
-                kind = key.replace("  ", " ")
+                kind = key.replace(" ", "_")
                 break
         parts.append(Partition(index=i, offset=int(m.group(1)), size=0, kind=kind))
     extracted = next((d for d in workdir.glob("_*.extracted") if d.is_dir()), None)
@@ -151,6 +162,7 @@ def _carve(image: FirmwareImage, workdir: Path) -> list[Partition]:
             start = idx + 1
             if len(parts) > 512:
                 break
+    # Entropy map, 64KB windows, to flag encrypted regions.
     win = 64 << 10
     for off in range(0, min(len(data), 32 << 20), win):
         e = _entropy(data[off:off + win])
@@ -165,6 +177,11 @@ def _carve(image: FirmwareImage, workdir: Path) -> list[Partition]:
 def locate_rootfs(search_root: Path) -> tuple[Path | None, dict]:
     """
     Score every extracted directory on how much it looks like a Linux root.
+
+    Scoring beats "deepest directory" or "largest directory" heuristics,
+    which both pick wrong on images that ship a recovery rootfs alongside the
+    real one. Returns the winner plus the full scoreboard for the report, so
+    a researcher can see what was rejected and why.
     """
     scores: dict[str, int] = {}
     for cand in [search_root, *(d for d in search_root.rglob("*") if d.is_dir())]:
@@ -194,12 +211,14 @@ def identify(rootfs: RootFS) -> RootFS:
             }.get(machine, f"unknown(0x{machine:x})")
             if rootfs.arch == "mips" and rootfs.endian == "little":
                 rootfs.arch = "mipsel"
+
     if rootfs.find("lib/ld-uClibc.so.0", "lib/libuClibc.so.0"):
         rootfs.libc = "uclibc"
     elif rootfs.find("lib/ld-musl-armhf.so.1", "lib/ld-musl-x86_64.so.1"):
         rootfs.libc = "musl"
     elif rootfs.find("lib/libc.so.6"):
         rootfs.libc = "glibc"
+
     if (rootfs.root / "etc/init.d").is_dir():
         rootfs.init_system = "procd" if rootfs.find("sbin/procd") else "sysvinit"
     elif (rootfs.root / "lib/systemd").is_dir():

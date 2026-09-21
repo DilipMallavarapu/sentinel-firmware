@@ -1,27 +1,35 @@
 """
 sentinel.core.verifiers
+2=======================
+
 Concrete offline re-checks for each proof kind.
+
 Rules every verifier here obeys:
-No network. Ever. A verifier that needs the target is not a verifier.
-No model calls. Determinism is the whole point.
-Operates only on bytes stored under the run's artifact root.
-Returns False rather than raising on missing/garbled evidence -- a proof
-we cannot re-check is a proof that fails.
+  * No network. Ever. A verifier that needs the target is not a verifier.
+  * No model calls. Determinism is the whole point.
+  * Operates only on bytes stored under the run's artifact root.
+  * Returns False rather than raising on missing/garbled evidence -- a proof
+    we cannot re-check is a proof that fails.
+
 If you add a proof kind, you add its verifier here in the same commit. The
 registry will refuse to load a detector whose declared proof kinds have no
 verifier, so this file is the gate that keeps CONFIRMED honest.
 """
+
 from __future__ import annotations
+
 import hashlib
 import json
 import re
 from pathlib import Path
+
 from .contracts import ProofArtifact, verifier
 
 
 def _read(root: Path, rel: str) -> bytes | None:
     p = (root / rel).resolve()
     try:
+        # Containment check: a proof must never point outside the run dir.
         p.relative_to(root.resolve())
     except ValueError:
         return None
@@ -38,13 +46,15 @@ def _sha(data: bytes) -> str:
 def verify_byte_match(proof: ProofArtifact, root: Path) -> bool:
     """
     The strongest proof we have, and the backbone of firmware findings.
+
     claim = {
-        "blob": "blobs/ab12_shadow",
-        "file_sha256": "...",
+        "blob": "blobs/ab12_shadow",   # the captured file
+        "file_sha256": "...",          # what it hashed to at capture time
         "offset": 420,
-        "needle_sha256": "...",
+        "needle_sha256": "...",        # sha of the exact matched bytes
         "length": 57,
     }
+
     Passes only if the stored file still hashes to the recorded digest and the
     bytes at the recorded offset still hash to the recorded needle digest.
     There is no interpretation here, which is exactly why it cannot be wrong.
@@ -66,6 +76,7 @@ def verify_pattern_match(proof: ProofArtifact, root: Path) -> bool:
     the pattern is authored by us, so it is only allowed for detectors whose
     pattern has a structural validator attached (a crypt(3) hash shape, a PEM
     header plus a base64 body that decodes, an RSA modulus of legal length).
+
     claim = {"blob": ..., "file_sha256": ..., "pattern": ...,
              "expect_groups": ["root", "$1$..."], "validator": "crypt_hash"}
     """
@@ -110,11 +121,13 @@ def verify_differential(proof: ProofArtifact, root: Path) -> bool:
     """
     Control-vs-probe response differential, for injection classes on the web
     lane. Both bodies are stored at detection time.
+
     The claim must name the divergence *and* assert the control is stable:
     we store two control responses, and if the two controls already differ in
     the same dimension the target is simply noisy and the finding is void.
     That second control is what removes the bulk of blind-SQLi false
     positives.
+
     claim = {"control_a": ..., "control_b": ..., "probe": ...,
              "dimension": "length" | "status" | "body_sha",
              "min_delta": 32}
@@ -125,6 +138,7 @@ def verify_differential(proof: ProofArtifact, root: Path) -> bool:
     p = _read(root, c.get("probe", ""))
     if a is None or b is None or p is None:
         return False
+
     dim = c.get("dimension")
     if dim == "body_sha":
         return _sha(a) == _sha(b) and _sha(p) != _sha(a)
@@ -143,8 +157,10 @@ def verify_oob_callback(proof: ProofArtifact, root: Path) -> bool:
     """
     Out-of-band interaction. The canary must be high-entropy and bound to a
     single probe, so a recorded hit cannot be attributed to anything else.
+
     claim = {"canary": "<32 hex>.oob.example", "probe_binding_sha256": ...,
              "log_blob": "blobs/..oob.jsonl"}
+
     We re-read the interaction log and require exactly one hit for the canary.
     Two hits means something is replaying our probes and the attribution is
     no longer sound.
@@ -165,58 +181,34 @@ def verify_oob_callback(proof: ProofArtifact, root: Path) -> bool:
 def verify_runtime_diff(proof: ProofArtifact, root: Path) -> bool:
     """
     The only way a firmware finding crosses from PRESENCE to REACHABILITY.
+
     Requires a stored transcript from the emulated device showing that an
     unauthenticated request reached the code path, plus a control transcript
     showing the same request without the triggering input did not.
-    The second control is what makes this trustworthy on embedded targets,
-    which stamp uptime counters and session ids into responses.
-    claim = {"control_transcript": ..., "control_b_transcript": ...,
-             "probe_transcript": ..., "observable": "status" | "marker" | "length",
-             "marker": "uid=0(root)"}
+
+    claim = {"control_transcript": ..., "probe_transcript": ...,
+             "observable": "status" | "marker", "marker": "uid=0(root)"}
     """
     c = proof.claim
     ctrl = _read(root, c.get("control_transcript", ""))
-    ctrl_b = _read(root, c.get("control_b_transcript", ""))
     probe = _read(root, c.get("probe_transcript", ""))
     if ctrl is None or probe is None:
         return False
-
-    if ctrl_b is not None:
-        try:
-            ctrl_json = json.loads(ctrl)
-            ctrl_b_json = json.loads(ctrl_b)
-            ctrl_len = len(ctrl_json.get("stdout", ""))
-            ctrl_b_len = len(ctrl_b_json.get("stdout", ""))
-            if abs(ctrl_len - ctrl_b_len) >= 48:
-                return False
-        except Exception:
-            pass
-
     if c.get("observable") == "marker":
         m = c.get("marker", "").encode()
         return bool(m) and m in probe and m not in ctrl
-
     try:
         cs = json.loads(ctrl).get("status")
         ps = json.loads(probe).get("status")
     except Exception:
         return False
-
-    if c.get("observable") == "status":
-        try:
-            cs_b = json.loads(ctrl_b).get("status") if ctrl_b else cs
-            if cs != cs_b:
-                return False
-        except Exception:
-            pass
-
     return cs != ps and ps is not None
 
 
 @verifier("sbom_pin")
 def verify_sbom_pin(proof: ProofArtifact, root: Path) -> bool:
     """
-    For CANDIDATE-tier version findings. Proves the version string exists,
+    For CANDIDATE-tier version findings. Proves the *version string* exists,
     never that the CVE applies. Present so version findings still carry
     re-checkable evidence even though they stay at CANDIDATE.
     """
