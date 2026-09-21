@@ -6,7 +6,7 @@ thing, and reports findings that carry evidence you can re-check later.
 The design rule everything else follows from:
 
 > A finding is only `confirmed` if it carries a proof artifact that a
-> deterministic verifier can re-check offline — no network, no model, just
+> deterministic verifier can re-check offline, no network, no model, just
 > stored bytes.
 
 `Finding.confirm()` runs the verifier at the moment of detection and raises
@@ -82,7 +82,7 @@ pip install unblob binwalk            # extraction; not needed for a rootfs
 ```
 
 `unblob` shells out to a long tail of extractors, several of which will write
-outside their output directory on a malformed archive — and vendor images are
+outside their output directory on a malformed archive and vendor images are
 malformed routinely. Run extraction in the container (`docker compose build`)
 rather than on your host.
 
@@ -95,7 +95,7 @@ python3 scan_rootfs.py /path/to/rootfs --scope BOUNTY-REF-123
 ```
 
 Skips `acquire`/`unpack`. Warns if the directory looks like an extraction
-fragment rather than a root filesystem — a clean report from two top-level
+fragment rather than a root filesystem, a clean report from two top-level
 directories is the most dangerous output this tool can produce.
 
 ### A full image
@@ -121,7 +121,7 @@ python3 inspect_run.py runs/<id>                     # re-verify every proof
 python3 inspect_run.py runs/<id> --target etc/shadow --reveal
 ```
 
-Reports store `value_sha256`, never the credential — a `report.json` you
+Reports store `value_sha256`, never the credential, a `report.json` you
 attach to a disclosure email should not be a credential dump. Values live in
 the blob store and this is what reads them. Masked unless `--reveal`;
 multi-line key material is withheld entirely.
@@ -133,7 +133,7 @@ know before you cite it.
 
 ### Booting the image
 
-For boards QEMU models — ASPEED AST2400/2500/2600, which covers most
+For boards QEMU models, ASPEED AST2400/2500/2600, which covers most
 OpenBMC targets:
 
 ```bash
@@ -169,7 +169,7 @@ CHECKLIST.md                    what a complete assessment covers
 
 Pick the path by how the finding gets proved, not by how hard the
 vulnerability class sounds. Declarative YAML when the proof is a byte match,
-a validated pattern, or a control/probe differential — see
+a validated pattern, or a control/probe differential, see
 `sentinel/templates/SCHEMA.md`. A Python or Go plugin when it needs real
 logic.
 
