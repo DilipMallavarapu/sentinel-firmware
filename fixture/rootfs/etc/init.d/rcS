@@ -1,0 +1,4 @@
+#!/bin/sh
+/sbin/telnetd -p 23 &
+/usr/sbin/lighttpd -f /etc/lighttpd.conf -u root &
+# dropbear disabled

@@ -1,0 +1,10 @@
+# Core pipeline has no hard third-party dependencies -- contracts, checkpoint,
+# goworker and the analyzers are stdlib only, on purpose. Everything below is
+# for a stage that can degrade gracefully without it.
+
+unblob>=25.0.0          # primary extractor
+binwalk>=2.3.4          # fallback extractor
+pyelftools>=0.31        # Python-side ELF reads when the Go worker is absent
+cve-bin-tool>=3.3       # SBOM -> CVE candidates (candidate tier only)
+PyYAML>=6.0             # detector templates
+requests>=2.32          # web lane / emulated-target scanning

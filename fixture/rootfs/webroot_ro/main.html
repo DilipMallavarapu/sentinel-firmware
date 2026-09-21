@@ -1,0 +1,8 @@
+<html><script>
+function doLogin(){
+  var password = document.getElementById("pwd").value;
+  $.post("/login.cgi", {password: $("#pwd").val(), user: form.user.value});
+  if (password.length < 6) { alert("too short"); }
+}
+var admin_password = form.admin.value;
+</script></html>

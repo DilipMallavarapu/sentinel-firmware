@@ -1,0 +1,21 @@
+# Never commit firmware images. Most vendor firmware is under a licence that
+# forbids redistribution, and a public repo full of vendor blobs is a
+# takedown request waiting to happen.
+images/
+*.bin
+*.img
+*.dav
+*.trx
+
+# Never commit run output. Evidence blobs contain the credentials, keys and
+# shadow files the detectors found -- that is the entire point of them, and
+# it is also exactly why they do not belong in git.
+runs/
+*.jsonl
+report.json
+
+bin/
+__pycache__/
+*.pyc
+.venv/
+venv/

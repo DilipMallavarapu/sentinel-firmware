@@ -1,0 +1,24 @@
+services:
+  sentinel:
+    build: .
+    image: sentinel:latest
+    volumes:
+      # Images mount read-only. The pipeline hashes them and never writes
+      # back; a scanner that can modify its own evidence is not a scanner.
+      - ./images:/work/images:ro
+      - ./runs:/work/runs
+    ports:
+      - "127.0.0.1:8089:8089"   # dashboard, loopback only
+    networks: [analysis]
+    # Extraction handles hostile input. Keep the blast radius small.
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: false
+    tmpfs: ["/tmp:size=2g"]
+
+networks:
+  analysis:
+    # internal: true gives the emulated guest no route off the host. Flip it
+    # only when your scope explicitly authorises egress, and know that you
+    # are then letting vendor firmware talk to the internet from your IP.
+    internal: true

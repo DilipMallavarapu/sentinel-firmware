@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sentinel — firmware run</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;450;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#E9ECE6; --paper-2:#DFE3DB; --rule:#C2C9BE;
+    --ink:#1B2621; --ink-soft:#5A6560;
+    --signal:#B06A12;      /* running / in flight */
+    --oxide:#9A3B2A;       /* confirmed, high severity */
+    --slate:#46607A;       /* probable */
+    --moss:#4A6B3F;        /* verified proof */
+    --sans:"IBM Plex Sans",system-ui,sans-serif;
+    --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+    box-sizing:border-box;
+    padding-top:env(safe-area-inset-top,0px);
+    padding-bottom:env(safe-area-inset-bottom,0px);
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --paper:#171A16; --paper-2:#1F241E; --rule:#333B31;
+      --ink:#DDE3D8; --ink-soft:#8D998A;
+      --signal:#D89A45; --oxide:#D2705C; --slate:#83A6C4; --moss:#8FB77F;
+    }
+  }
+  *,*::before,*::after{box-sizing:inherit}
+  html{scroll-padding-top:env(safe-area-inset-top,0px)}
+  body{margin:0;background:var(--paper);color:var(--ink);
+       font:450 15px/1.55 var(--sans);-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1180px;margin:0 auto;padding:clamp(20px,4vw,48px)}
+
+  /* ---- masthead: the image fingerprint is the subject of the page ---- */
+  header{border-bottom:2px solid var(--ink);padding-bottom:22px}
+  .eyebrow{font:500 12px/1 var(--mono);color:var(--ink-soft);
+           letter-spacing:.02em;margin:0 0 14px}
+  .digest{font:600 clamp(19px,4.4vw,38px)/1.18 var(--mono);
+          margin:0;word-break:break-all;letter-spacing:-.015em}
+  .digest .lo{color:var(--ink-soft);font-weight:400}
+  .facts{display:flex;flex-wrap:wrap;gap:6px 30px;margin:18px 0 0;padding:0;
+         list-style:none;font:400 13.5px/1.4 var(--mono);color:var(--ink-soft)}
+  .facts b{font-weight:600;color:var(--ink)}
+
+  /* ---- two-column body ---- */
+  .cols{display:grid;grid-template-columns:minmax(0,340px) minmax(0,1fr);
+        gap:clamp(24px,4vw,56px);margin-top:34px;align-items:start}
+  @media (max-width:820px){.cols{grid-template-columns:1fr}}
+  h2{font:600 14px/1 var(--sans);margin:0 0 16px;color:var(--ink-soft)}
+
+  /* ---- checkpoint chain, drawn as a signal trace ---- */
+  .chain{list-style:none;margin:0;padding:0;position:relative}
+  .chain::before{content:"";position:absolute;left:7px;top:10px;bottom:14px;
+                 width:2px;background:var(--rule)}
+  .node{position:relative;padding:0 0 18px 30px}
+  .dot{position:absolute;left:0;top:4px;width:16px;height:16px;border-radius:50%;
+       border:2px solid var(--rule);background:var(--paper)}
+  .node[data-state="ok"] .dot,.node[data-state="cached"] .dot{
+       border-color:var(--moss);background:var(--moss)}
+  .node[data-state="running"] .dot{border-color:var(--signal);background:var(--paper)}
+  .node[data-state="failed"] .dot{border-color:var(--oxide);background:var(--oxide)}
+  .node[data-state="blocked"] .dot,.node[data-state="skipped"] .dot{
+       border-style:dashed}
+  .node[data-state="running"] .dot::after{content:"";position:absolute;
+       inset:2px;border-radius:50%;background:var(--signal);
+       animation:pulse 1.15s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:.25;transform:scale(.55)}50%{opacity:1;transform:scale(1)}}
+  @media (prefers-reduced-motion:reduce){.node .dot::after{animation:none;opacity:.8}}
+  .node h3{font:450 15px/1.35 var(--sans);margin:0}
+  .node[data-state="pending"] h3,.node[data-state="skipped"] h3{color:var(--ink-soft)}
+  .node p{margin:3px 0 0;font:400 12.5px/1.45 var(--mono);color:var(--ink-soft)}
+  .node[data-state="failed"] p{color:var(--oxide)}
+  .tally{float:right;font:600 12.5px/1 var(--mono);color:var(--ink-soft)}
+
+  /* ---- findings ledger, grouped by what we can actually prove ---- */
+  .tier{margin:0 0 30px}
+  .tier-head{display:flex;align-items:baseline;gap:12px;
+             border-bottom:1px solid var(--rule);padding-bottom:7px;margin-bottom:4px}
+  .tier-head h3{font:600 15px/1 var(--sans);margin:0}
+  .tier-head span{font:400 12.5px/1 var(--mono);color:var(--ink-soft)}
+  .tier-note{margin:8px 0 12px;font:400 13px/1.5 var(--sans);color:var(--ink-soft);
+             max-width:62ch}
+  .f{display:grid;grid-template-columns:auto minmax(0,1fr);gap:0 14px;
+     padding:11px 0;border-bottom:1px solid var(--rule)}
+  .sev{font:600 11.5px/1.5 var(--mono);padding-top:2px;width:64px}
+  .sev[data-s="critical"],.sev[data-s="high"]{color:var(--oxide)}
+  .sev[data-s="medium"]{color:var(--signal)}
+  .sev[data-s="low"],.sev[data-s="info"]{color:var(--ink-soft)}
+  .f-title{font:450 14.5px/1.4 var(--sans);margin:0}
+  .f-loc{grid-column:2;margin:4px 0 0;font:400 12.5px/1.45 var(--mono);
+         color:var(--ink-soft);word-break:break-all}
+  .stamp{display:inline-block;margin-left:8px;padding:1px 6px;border-radius:2px;
+         font:500 11px/1.5 var(--mono);border:1px solid var(--moss);color:var(--moss)}
+  .axis{color:var(--slate)}
+
+  .empty{padding:26px 0;color:var(--ink-soft);font-size:14px;max-width:58ch}
+  footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);
+         font:400 12.5px/1.6 var(--mono);color:var(--ink-soft)}
+  .live{display:inline-flex;align-items:center;gap:7px}
+  .live i{width:7px;height:7px;border-radius:50%;background:var(--ink-soft)}
+  .live[data-on="1"] i{background:var(--moss)}
+  a{color:inherit}
+  :focus-visible{outline:2px solid var(--signal);outline-offset:2px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <p class="eyebrow" id="auth">authorization pending</p>
+    <h1 class="digest" id="digest">awaiting image<span class="lo"></span></h1>
+    <ul class="facts" id="facts"></ul>
+  </header>
+
+  <div class="cols">
+    <section aria-labelledby="ch-h">
+      <h2 id="ch-h">Checkpoints</h2>
+      <ol class="chain" id="chain">
+        <li class="empty">Start a run to populate the chain.</li>
+      </ol>
+    </section>
+
+    <section aria-labelledby="fd-h">
+      <h2 id="fd-h">Findings</h2>
+      <div id="tiers"></div>
+    </section>
+  </div>
+
+  <footer>
+    <span class="live" id="live" data-on="0"><i></i><span id="live-t">not connected</span></span>
+    · run <span id="runid">—</span>
+  </footer>
+</div>
+
+<script>
+(() => {
+  const TIERS = [
+    ["confirmed", "Confirmed",
+     "Each of these carries a stored proof that was re-checked offline just now. If a proof stops verifying, the finding leaves this list."],
+    ["probable", "Probable",
+     "Several independent signals agree, but nothing here has a re-checkable oracle. Read before you cite."],
+    ["candidate", "Candidate",
+     "One weak signal. Version matches live here: knowing a binary reports a version is not knowing the device is vulnerable."],
+    ["refuted", "Refuted",
+     "Disproved on revalidation. Kept so the heuristics can be tuned against them."],
+  ];
+
+  const $ = s => document.querySelector(s);
+  const state = { plan: [], findings: [], meta: {} };
+
+  const esc = s => String(s ?? "").replace(/[&<>"]/g,
+    c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+
+  function renderHeader() {
+    const m = state.meta;
+    if (m.sha256) {
+      $("#digest").innerHTML =
+        esc(m.sha256.slice(0,32)) + '<span class="lo">' + esc(m.sha256.slice(32)) + "</span>";
+    }
+    if (m.authorization) $("#auth").textContent = "authorized under " + m.authorization;
+    const facts = [
+      ["arch", m.arch], ["libc", m.libc], ["init", m.init],
+      ["files", m.files && m.files.toLocaleString()],
+      ["size", m.size && (m.size/1e6).toFixed(1) + " MB"],
+    ].filter(([,v]) => v);
+    $("#facts").innerHTML = facts.map(([k,v]) =>
+      `<li>${esc(k)} <b>${esc(v)}</b></li>`).join("");
+    $("#runid").textContent = m.run_id || "—";
+  }
+
+  function renderChain() {
+    const el = $("#chain");
+    if (!state.plan.length) return;
+    el.innerHTML = state.plan.map(n => {
+      const tally = n.findings ? `<span class="tally">${n.findings}</span>` : "";
+      const note = n.note || ({
+        pending: "queued", running: "working…", blocked: "upstream failed",
+        skipped: "not applicable", cached: "unchanged since last run",
+      })[n.state] || "";
+      const time = n.elapsed != null ? ` · ${n.elapsed}s` : "";
+      return `<li class="node" data-state="${esc(n.state)}">
+        <span class="dot"></span>${tally}
+        <h3>${esc(n.label || n.id)}</h3>
+        <p>${esc(note)}${esc(time)}</p></li>`;
+    }).join("");
+  }
+
+  function renderFindings() {
+    const host = $("#tiers");
+    if (!state.findings.length) {
+      host.innerHTML = `<p class="empty">No findings yet. Confirmed findings
+        appear the moment a detector captures a proof that verifies.</p>`;
+      return;
+    }
+    const order = { critical:0, high:1, medium:2, low:3, info:4 };
+    host.innerHTML = TIERS.map(([key, label, note]) => {
+      const rows = state.findings
+        .filter(f => f.confidence === key)
+        .sort((a,b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9));
+      if (!rows.length) return "";
+      return `<section class="tier">
+        <div class="tier-head"><h3>${label}</h3><span>${rows.length}</span></div>
+        <p class="tier-note">${note}</p>
+        ${rows.map(f => `<article class="f">
+          <span class="sev" data-s="${esc(f.severity)}">${esc(f.severity)}</span>
+          <p class="f-title">${esc(f.title)}${
+            f.proof ? '<span class="stamp">proof ok</span>' : ""}</p>
+          <p class="f-loc">${esc(f.target)}
+            <span class="axis">· ${esc(f.axis)}</span>${
+            f.cwe ? " · " + esc(f.cwe) : ""}</p>
+        </article>`).join("")}
+      </section>`;
+    }).join("");
+  }
+
+  function upsertNode(patch) {
+    const n = state.plan.find(x => x.id === patch.id);
+    if (n) Object.assign(n, patch); else state.plan.push(patch);
+    renderChain();
+  }
+
+  const handlers = {
+    "run.start": d => {
+      state.plan = d.plan || [];
+      state.meta.run_id = d.run_id;
+      renderHeader(); renderChain();
+    },
+    "checkpoint.state": upsertNode,
+    "checkpoint.progress": d => upsertNode({ id: d.id,
+      note: `${(d.scanned||0).toLocaleString()} scanned` }),
+    "finding": d => { state.findings.push(d); renderFindings(); },
+    "run.end": d => {
+      Object.assign(state.meta, d);
+      $("#live-t").textContent = "run finished";
+      renderHeader();
+    },
+    "meta": d => { Object.assign(state.meta, d); renderHeader(); },
+  };
+
+  // The Python side emits these over sentinel.server's SSE endpoint.
+  const params = new URLSearchParams(location.search);
+  const url = params.get("stream") || "/stream";
+  let src;
+  try { src = new EventSource(url); } catch (e) { src = null; }
+
+  if (src) {
+    src.onopen = () => {
+      $("#live").dataset.on = "1";
+      $("#live-t").textContent = "connected";
+    };
+    src.onerror = () => {
+      $("#live").dataset.on = "0";
+      $("#live-t").textContent = "stream unavailable — showing last state";
+    };
+    for (const [name, fn] of Object.entries(handlers)) {
+      src.addEventListener(name, ev => {
+        try { fn(JSON.parse(ev.data)); } catch (e) { /* malformed frame */ }
+      });
+    }
+  }
+
+  renderHeader(); renderFindings();
+})();
+</script>
+</body>
+</html>
