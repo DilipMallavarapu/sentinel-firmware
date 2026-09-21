@@ -43,7 +43,7 @@ how much is proven.
 | `confirmed` | proof artifact exists and re-verified. Reported by default. |
 | `probable` | several independent signals agree, no single re-checkable oracle. Separate queue. |
 | `candidate` | one weak signal. Version-string CVE matches live here almost always. |
-| `refuted` | revalidation disproved it. Kept, never deleted — refutations tune the heuristics. |
+| `refuted` | revalidation disproved it. Kept, never deleted, refutations tune the heuristics. |
 
 ## The pipeline
 
@@ -57,7 +57,7 @@ acquire ─→ unpack ─→ rootfs ─┬─→ services ──┐
 
 Checkpoints are resumable and fingerprinted on (stage version, config,
 upstream fingerprints). Change the image or bump a stage and it re-runs;
-otherwise it loads from cache. A failed stage blocks only its dependents —
+otherwise it loads from cache. A failed stage blocks only its dependents,
 independent branches still produce findings.
 
 `emulate`, `reachability` and `webscan` are optional by design. A run that
