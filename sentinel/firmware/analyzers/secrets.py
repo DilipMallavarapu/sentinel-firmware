@@ -48,6 +48,21 @@ from ..models import RootFS
 
 # Known-benign key material shipped by upstream projects. Extend freely --
 # a refutation list is cheaper and more honest than a confidence fudge.
+# Password hashes published by the upstream project. Their presence is a
+# documented default, not a vendor mistake: anyone can read the credential in
+# the project's own docs, so finding it in the image reveals nothing. Still
+# reported, because an operator who never changed it has a live problem --
+# but as INFO with the known credential named, not HIGH as though it were a
+# secret we recovered.
+#
+# Keyed by sha256 of the hash string itself. Add entries only when you can
+# cite where the credential is published.
+KNOWN_DEFAULT_HASHES = {
+    # OpenBMC obmc-phosphor-image: root / 0penBmc
+    "$6$UGMqyqdG$GqTb3tXPFx9AJlzTw/8X5RoW2Z.100dT.acuk8AFJfNQYr.ZRL8itMIgLqsdq46RNHgiv78XayOSl.IbR4DFU.":
+        ("OpenBMC", "root / 0penBmc, shipped in stock obmc-phosphor-image"),
+}
+
 BENIGN_KEY_SHA256 = {
     # OpenSSL demo key, Dropbear test key, etc. Populate from your corpus.
 }
@@ -348,6 +363,20 @@ class HardcodedCredentialDetector:
                 "details": [hit.detail, *(s.detail for s in siblings)][:50],
             },
         )
+
+        known = KNOWN_DEFAULT_HASHES.get(hit.needle.decode("utf-8", "replace"))
+        if known:
+            project, cred = known
+            finding.severity = Severity.INFO
+            finding.title = f"{project} default credential unchanged in {rel}"
+            finding.summary = (
+                f"This is the published {project} default ({cred}). It is not "
+                f"a recovered secret -- the credential is in the project's own "
+                f"documentation. Reported because a device shipped or deployed "
+                f"without changing it is remotely accessible to anyone who "
+                f"reads those docs."
+            )
+            finding.context["known_default"] = project
 
         # Documentation and sample paths are real matches in unreal places.
         if DOC_PATH_RE.search(rel):

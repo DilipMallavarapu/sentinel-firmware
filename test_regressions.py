@@ -89,6 +89,14 @@ check("a uid-0 non-root account is named root-equivalent",
 check("uid 0 plus DES escalates to CRITICAL",
       bool(pw) and pw[0].severity == Severity.CRITICAL)
 
+# OpenBMC Romulus ships root/0penBmc, published upstream. A documented
+# default and a vendor-baked secret are different findings, and calling the
+# first HIGH costs credibility with a maintainer who knows their own image.
+kd = [f for f in findings if f.context.get("known_default")]
+check("a published default hash is demoted to INFO and named",
+      bool(kd) and kd[0].severity == Severity.INFO
+      and "OpenBMC" in kd[0].title)
+
 an = ServiceAnalyzer()
 services = an.discover(rfs)
 check("services under etc_ro/init.d are found",
