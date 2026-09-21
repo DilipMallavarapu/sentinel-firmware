@@ -388,7 +388,7 @@ class CommandTemplateDetector:
         tags=["command-injection", "binary", "triage"],
     )
 
-    def __init__(self, min_score: int = 12, max_binaries: int = 60):
+    def __init__(self, min_score: int = 17, max_binaries: int = 60):
         self.min_score = min_score
         self.max_binaries = max_binaries
 
@@ -431,7 +431,7 @@ class CommandTemplateDetector:
                 blobs=[blob],
             )
 
-            sev = Severity.MEDIUM if top.score >= 18 else Severity.LOW
+            sev = Severity.MEDIUM if top.score >= 20 else Severity.LOW
             f = Finding(
                 detector_id=self.meta.id,
                 title=(f"{entry.rel} builds shell commands from format "
