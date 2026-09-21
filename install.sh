@@ -38,8 +38,9 @@ fi
 # canonical name -> destination directory
 route() {
   case "$1" in
-    secrets.py|services.py|hardening.py)  echo sentinel/firmware/analyzers ;;
-    emulate.py|pipeline.py|models.py|unpack.py) echo sentinel/firmware ;;
+    secrets.py|services.py|hardening.py|backdoor.py|binanalysis.py|\
+    sharedkeys.py|http_auth.py) echo sentinel/firmware/analyzers ;;
+    emulate.py|emulate_system.py|pipeline.py|models.py|unpack.py) echo sentinel/firmware ;;
     contracts.py|verifiers.py|checkpoint.py|goworker.py) echo sentinel/core ;;
     cli.py)             echo sentinel ;;
     main.go)            echo go/elfscan ;;

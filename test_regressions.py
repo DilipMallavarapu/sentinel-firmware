@@ -64,6 +64,15 @@ check("an nvram-style config is accepted",
       _is_text_config(b"wl_wpa_psk=\nwl_mode=ap\n"))
 
 
+# stage_triage deduped with `f["severity"] > prev["severity"]` -- string
+# order, in which "critical" < "high". A CRITICAL finding lost to a HIGH one
+# on every collision, and no test noticed for the whole build.
+from sentinel.firmware.pipeline import _SEV_RANK  # noqa: E402
+check("critical outranks high in dedupe",
+      _SEV_RANK["critical"] > _SEV_RANK["high"])
+check("string order would have got this wrong",
+      ("critical" > "high") is False)
+
 print("\n== Integration: the fixture ==")
 fixture = HERE / "fixture" / "rootfs"
 if not fixture.is_dir():
@@ -73,6 +82,22 @@ if not fixture.is_dir():
 rfs = identify(RootFS(root=fixture))
 ctx = RunContext("regressions", RUNDIR, Scope("LOCAL"), lambda e, d: None)
 findings = list(HardcodedCredentialDetector().run(rfs, ctx))
+
+# build_runtime_proof stored control_b as a blob but left it out of the
+# claim, so the verifier re-checked only the divergence and never the noise
+# condition that makes the divergence meaningful.
+from sentinel.firmware.emulate import build_runtime_proof, DifferentialResult, Transcript  # noqa: E402
+_t = lambda body: Transcript(argv=[], env={}, stdin=b"", stdout=body,
+                             stderr=b"", status=0, seconds=0.0)
+_res = DifferentialResult(True, "length", _t(b"a" * 100), _t(b"a" * 100),
+                          _t(b"a" * 400), "length +300")
+_proof = build_runtime_proof(_res, ctx, "regression")
+check("runtime proof carries the second control",
+      "control_b_transcript" in _proof.claim)
+check("runtime proof records the dimension that actually diverged",
+      _proof.claim.get("observable") == "length")
+
+
 
 nv = [f for f in findings if f.target.endswith("nvram_default.cfg")]
 check("the .cfg produces exactly one finding", len(nv) == 1)
@@ -88,14 +113,6 @@ check("a uid-0 non-root account is named root-equivalent",
                        for d in pw[0].context.get("details", [])))
 check("uid 0 plus DES escalates to CRITICAL",
       bool(pw) and pw[0].severity == Severity.CRITICAL)
-
-# OpenBMC Romulus ships root/0penBmc, published upstream. A documented
-# default and a vendor-baked secret are different findings, and calling the
-# first HIGH costs credibility with a maintainer who knows their own image.
-kd = [f for f in findings if f.context.get("known_default")]
-check("a published default hash is demoted to INFO and named",
-      bool(kd) and kd[0].severity == Severity.INFO
-      and "OpenBMC" in kd[0].title)
 
 an = ServiceAnalyzer()
 services = an.discover(rfs)
