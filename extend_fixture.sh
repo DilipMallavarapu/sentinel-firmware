@@ -3,7 +3,8 @@
 # Run from the repo root, once, before the updated smoke_test.py.
 set -euo pipefail
 FX=fixture/rootfs
-mkdir -p "$FX/webroot_ro" "$FX/etc_ro/init.d"
+mkdir -p "$FX/bin" "$FX/sbin" "$FX/lib" "$FX/docs" "$FX/usr/sbin" \
+         "$FX/etc/init.d" "$FX/webroot_ro" "$FX/etc_ro/init.d"
 
 # The exact false-positive shape from webroot_ro/main.html: JavaScript that
 # satisfies a key=value credential pattern while containing no secret.

@@ -14,7 +14,7 @@ runs/
 *.jsonl
 report.json
 
-bin/
+/bin/
 __pycache__/
 *.pyc
 .venv/

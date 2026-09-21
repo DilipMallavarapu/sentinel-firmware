@@ -83,6 +83,18 @@ STOPWORDS = {
     "left", "right", "top", "bottom", "center", "margin", "padding", "border",
     "background", "font", "size", "align", "valign", "colspan", "rowspan",
     "and", "the", "for", "var", "let", "const", "this", "self", "new",
+    # Words that are real form values but carry no device meaning, and that
+    # collide with unrelated strings in every binary on the system. `auto`
+    # matched a busybox mount option and put tar, ash, ps and getopt in the
+    # report.
+    "auto", "manual", "enable", "enabled", "disable", "disabled", "mode",
+    "state", "status", "start", "stop", "restart", "reset", "apply",
+    "cancel", "save", "close", "open", "edit", "delete", "remove", "add",
+    "yes", "test", "temp", "info", "help", "home", "back", "next", "prev",
+    "page", "line", "row", "col", "min", "max", "low", "high", "count",
+    "total", "level", "group", "order", "sort", "filter", "search", "query",
+    "result", "message", "warning", "success", "failed", "failure", "empty",
+    "flag", "step", "range", "unit", "scale", "offset", "buffer", "entry",
 }
 
 MIN_KEYWORD_LEN = 4
@@ -234,6 +246,8 @@ class SharedKeywordDetector:
             return                  # no front end worth correlating against
 
         results: list[tuple[Correlation, bytes]] = []
+        by_content: dict[str, str] = {}      # sha256 -> first path seen
+        aliases: dict[str, list[str]] = {}   # first path -> other names
         examined = 0
         for entry in subject.walk(max_size=16 << 20):
             if examined >= self.max_binaries:
@@ -245,6 +259,17 @@ class SharedKeywordDetector:
             if data[:4] != b"\x7fELF":
                 continue
             examined += 1
+
+            # Busybox ships one binary under a dozen applet names, and
+            # vendors rebuild the same daemon as dhcpcd_wan1..wan4. Reporting
+            # each copy separately turns one finding into ten and buries the
+            # distinct ones. Correlate once per distinct content.
+            digest = hashlib.sha256(data).hexdigest()
+            if digest in by_content:
+                aliases.setdefault(by_content[digest], []).append(entry.rel)
+                continue
+            by_content[digest] = entry.rel
+
             c = correlate(keywords, entry.rel, data)
             if c and len(c.shared) >= self.min_shared:
                 results.append((c, data))
@@ -255,6 +280,7 @@ class SharedKeywordDetector:
             hot = [k for k in c.shared if keywords[k].interesting]
             blob = ctx.store_blob(c.binary.replace("/", "_"), data[:4 << 20])
 
+            same = aliases.get(c.binary, [])
             if c.adjacencies:
                 kw, tmpl, dist = c.adjacencies[0]
                 needle = kw.encode()
@@ -262,7 +288,8 @@ class SharedKeywordDetector:
                 off = binary_strings(data, view).get(kw, 0)
                 sev = Severity.HIGH
                 headline = (f"{c.binary}: web parameter {kw!r} sits {dist} "
-                            f"bytes from {tmpl[:60]!r} in .rodata")
+                            f"bytes from {tmpl[:60]!r} in .rodata"
+                            + (f" (+{len(same)} identical copies)" if same else ""))
             else:
                 needle = c.shared[0].encode()
                 view = parse_elf(data)
@@ -318,6 +345,7 @@ class SharedKeywordDetector:
                     )[:8],
                     "next_step": ("xref the parameter string in a "
                                   "disassembler and follow it to the sink"),
+                    "identical_copies": aliases.get(c.binary, [])[:12],
                 },
                 triage_notes=["shared keywords locate the input boundary; "
                               "they do not prove dataflow"],

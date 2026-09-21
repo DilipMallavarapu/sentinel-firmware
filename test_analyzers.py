@@ -296,6 +296,19 @@ check("adjacency raises it to HIGH",
 # proof on a linker coincidence.
 check("shared keywords never reach confirmed",
       all(f.confidence != Confidence.CONFIRMED for f in _sk))
+# Busybox ships one binary under many applet names; vendors rebuild the same
+# daemon as dhcpcd_wan1..wan4. On a real image that turned one finding into
+# ten and buried the distinct ones.
+_dupe = make_elf(rodata=_ro)
+rfs_dup = rootfs_with({"www/wan.html": _page,
+                       "bin/netctrl": _dupe,
+                       "bin/netctrl_wan1": _dupe,
+                       "bin/netctrl_wan2": _dupe}, "duproot")
+_dups = list(SharedKeywordDetector().run(rfs_dup, ctx_for("sk3")))
+check("identical binaries collapse to one finding", len(_dups) == 1)
+check("the duplicate names are still recorded",
+      _dups and len(_dups[0].context.get("identical_copies", [])) == 2)
+
 check("a rootfs with no front end produces nothing",
       not list(SharedKeywordDetector().run(
           rootfs_with({"bin/x": make_elf(rodata=_ro)}, "nofrontend"),
