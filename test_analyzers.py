@@ -238,6 +238,71 @@ check("command-template findings never reach confirmed",
 
 
 # ==========================================================================
+section("sharedkeys: the front end / back end bridge")
+# ==========================================================================
+
+from sentinel.firmware.analyzers.sharedkeys import (  # noqa: E402
+    SharedKeywordDetector, STOPWORDS, correlate, extract_frontend_keywords,
+)
+
+_page = b"""<html><form action="/goform/setWan">
+<input type="text" name="wanIpAddr" id="wanIpAddr">
+<input type="text" name="wanNetmask">
+<input type="text" name="wanGateway">
+<input type="text" name="dnsServer1">
+<input type="text" name="pppoeUser">
+<input type="password" name="pppoePasswd">
+<input type="text" name="ddnsUser">
+<select name="wanIface"><option value="eth0">eth0</option></select>
+</form><script>var x = document.getElementById("hostName").value;</script></html>"""
+
+_ro = b"\x00".join([
+    b"wanIpAddr", b"echo nameserver %s >> /etc/resolv.conf",
+    b"pppoeUser", b"pppoePasswd", b"3322ip -S qdns -u %s:%s -h %s &",
+]) + b"\x00"
+
+rfs_sk = rootfs_with({"www/wan.html": _page,
+                      "bin/netctrl": make_elf(rodata=_ro),
+                      "bin/unrelated": make_elf(rodata=b"nothing here\x00")},
+                     "sharedroot")
+
+kws = extract_frontend_keywords(rfs_sk)
+check("parameter names are pulled out of the form", "wanIpAddr" in kws)
+check("a password field is captured too", "pppoePasswd" in kws)
+check("getElementById names are captured", "hostName" in kws)
+check("boilerplate is filtered out",
+      not any(k.lower() in STOPWORDS for k in kws))
+check("markup attributes are not mistaken for parameters",
+      "value" not in kws and "action" not in kws)
+
+_corr = correlate(kws, "bin/netctrl", (rfs_sk.root / "bin/netctrl").read_bytes())
+check("shared names are found in the binary", _corr and len(_corr.shared) >= 3)
+check("adjacency to a command template is detected",
+      _corr and len(_corr.adjacencies) >= 1)
+check("the nearest adjacency is the one reported first",
+      _corr and _corr.adjacencies == sorted(_corr.adjacencies, key=lambda a: a[2]))
+check("a binary sharing nothing correlates to nothing",
+      correlate(kws, "bin/unrelated",
+                (rfs_sk.root / "bin/unrelated").read_bytes()) is None
+      or not correlate(kws, "bin/unrelated",
+                       (rfs_sk.root / "bin/unrelated").read_bytes()).shared)
+
+_sk = list(SharedKeywordDetector().run(rfs_sk, ctx_for("sk")))
+check("the correlated binary is reported", any("netctrl" in f.target for f in _sk))
+check("adjacency raises it to HIGH",
+      any(f.severity == Severity.HIGH for f in _sk))
+# Two strings close together in .rodata usually share a function, but that is
+# evidence about source layout, not dataflow. Claiming confirmed would put a
+# proof on a linker coincidence.
+check("shared keywords never reach confirmed",
+      all(f.confidence != Confidence.CONFIRMED for f in _sk))
+check("a rootfs with no front end produces nothing",
+      not list(SharedKeywordDetector().run(
+          rootfs_with({"bin/x": make_elf(rodata=_ro)}, "nofrontend"),
+          ctx_for("sk2"))))
+
+
+# ==========================================================================
 section("backdoor: literature-derived detectors")
 # ==========================================================================
 

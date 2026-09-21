@@ -192,6 +192,30 @@ def stage_binanalysis(run: RunState, cfg: dict) -> CheckpointResult:
                                      else "; capstone absent, templates only")))
 
 
+def stage_sharedkeys(run: RunState, cfg: dict) -> CheckpointResult:
+    """
+    Intersect the web root's parameter names with strings in each binary.
+
+    The front end and back end must agree on parameter names, so the same
+    literal appears in both. That intersection marks where browser input
+    crosses into native code -- and where a shared name sits beside a shell
+    template in .rodata, it marks where to start tracing.
+    """
+    from .analyzers.sharedkeys import DETECTORS as SK_DETECTORS
+    rfs: RootFS = run.config["_rootfs"]
+    ctx = _ctx(run)
+    findings: list[Finding] = []
+    for det in SK_DETECTORS:
+        if det.applicable(rfs):
+            findings.extend(det.run(rfs, ctx))
+    n = _write_findings(run, "sharedkeys", findings)
+    adj = sum(len(f.context.get("adjacencies", [])) for f in findings)
+    return CheckpointResult(State.OK, outputs={"finding_count": n},
+                            findings=n,
+                            note=(f"{n} binaries handle web parameters; "
+                                  f"{adj} sit beside a command template"))
+
+
 def stage_elfscan(run: RunState, cfg: dict) -> CheckpointResult:
     rfs: RootFS = run.config["_rootfs"]
     worker = GoWorker("elfscan", search_paths=[Path(cfg.get("bin_dir", "bin"))])
@@ -407,6 +431,7 @@ def stage_triage(run: RunState, cfg: dict) -> CheckpointResult:
     """
     all_findings: list[dict] = []
     for stage in ("secrets", "elfscan", "services", "backdoor", "binanalysis",
+                  "sharedkeys", "sharedkeys",
                   "reachability", "webscan"):
         p = run.dir(stage) / "findings.jsonl"
         if p.is_file():
@@ -512,6 +537,8 @@ def build_pipeline() -> Pipeline:
                    needs=["rootfs"]),
         Checkpoint("binanalysis", "Analyse binary internals",
                    stage_binanalysis, needs=["rootfs"], optional=True),
+        Checkpoint("sharedkeys", "Correlate web inputs with binaries",
+                   stage_sharedkeys, needs=["rootfs"], optional=True),
         Checkpoint("elfscan", "Scan binary hardening", stage_elfscan,
                    needs=["rootfs", "services"], optional=True),
         Checkpoint("emulate", "Boot the device under QEMU", stage_emulate,
