@@ -42,3 +42,13 @@ struct.pack_into('<H',h,16,2); struct.pack_into('<H',h,18,0x28)
 struct.pack_into('<I',h,20,1)
 pathlib.Path('$FX/bin/busybox').write_bytes(bytes(h)+b'\x00'*200)"
 echo "fixture extended"
+
+# Tenda AC6: admin/support/user all at uid 0, most on 13-char DES hashes.
+# Added by hand during development and never written here, so a clean clone
+# failed the uid-0 and CRITICAL-escalation checks.
+printf 'admin:6HgsSsJIEOc2U:0:0:Administrator:/:/bin/sh\n' >> "$FX/etc_ro/passwd"
+
+# A daemon that exists but nothing starts, so orphan_binaries has a subject.
+# rcS mentions dropbear only in a comment, which the scanner skips.
+printf '#!/bin/sh\nexit 0\n' > "$FX/usr/sbin/dropbear"
+chmod +x "$FX/usr/sbin/dropbear"
