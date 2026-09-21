@@ -96,6 +96,18 @@ check("services under etc_ro/init.d are found",
 check("busybox is not read as init config",
       not any("busybox" in p for s in services for p in s.config_paths))
 
+# OpenBMC Romulus: stock openssl.cnf ships `# input_password = secret` as
+# documentation, and six confirmed findings came from commented-out lines.
+ssl = [f for f in findings if "openssl.cnf" in f.target]
+check("commented-out example credentials produce no finding", not ssl)
+
+# Also Romulus: TemporaryFileSystem=/tmp/bmcweb is a systemd sandboxing
+# directive, and reading it as the service binary reported the hardening
+# measure as the executable.
+bmc = next((s for s in services if s.name == "bmcweb"), None)
+check("systemd binary comes from ExecStart, not a sandbox directive",
+      bmc is not None and bmc.binary == "/usr/bin/bmcweb")
+
 orphans = an.orphan_binaries(services, rfs)
 gap = an.coverage_finding(orphans, services, rfs, ctx)
 check("a daemon nothing starts is reported as a coverage gap",

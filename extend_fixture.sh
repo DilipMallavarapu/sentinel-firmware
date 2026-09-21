@@ -41,8 +41,3 @@ struct.pack_into('<H',h,16,2); struct.pack_into('<H',h,18,0x28)
 struct.pack_into('<I',h,20,1)
 pathlib.Path('$FX/bin/busybox').write_bytes(bytes(h)+b'\x00'*200)"
 echo "fixture extended"
-
-# A daemon that exists but nothing starts, so orphan_binaries has something
-# to find. rcS mentions dropbear only in a comment, which the scanner skips.
-printf '#!/bin/sh\nexit 0\n' > "$FX/usr/sbin/dropbear"
-chmod +x "$FX/usr/sbin/dropbear"

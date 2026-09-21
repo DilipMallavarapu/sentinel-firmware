@@ -75,6 +75,18 @@ def _is_text_config(raw: bytes) -> bool:
     return nonprint <= len(head) * 0.05
 
 
+# systemd directives whose paths are never the service executable. Several
+# are sandboxing options, so mistaking them for the binary reports a
+# hardening measure as the thing being hardened.
+_PATH_DIRECTIVES = (
+    "temporaryfilesystem", "bindpaths", "bindreadonlypaths", "readwritepaths",
+    "readonlypaths", "inaccessiblepaths", "runtimedirectory", "statedirectory",
+    "cachedirectory", "logsdirectory", "configurationdirectory",
+    "workingdirectory", "rootdirectory", "rootimage", "environmentfile",
+    "pidfile", "conditionpathexists", "requiresmountsfor", "what", "where",
+)
+
+
 PORT_RE = re.compile(r"(?:^|[\s\"'=:])(?:-p|--port|port|listen)\s*[= ]\s*(\d{1,5})\b", re.I)
 RUNAS_RE = re.compile(
     r"(?:^|[\s;&|])(?:-u|--user|user)\s*[= ]\s*[\"']?([a-z_][a-z0-9_-]{0,31})", re.I)
@@ -138,9 +150,15 @@ class ServiceAnalyzer:
                 um = RUNAS_RE.search(stripped)
                 if um:
                     svc.runs_as = um.group(1)
-                bm = re.search(rf"(/\S*{re.escape(name)})\b", stripped)
-                if bm:
-                    svc.binary = bm.group(1)
+                lower = stripped.lower()
+                if lower.startswith(("execstart", "execstartpre")):
+                    em = re.search(r"=\s*[-@+!]*(/\S+)", stripped)
+                    if em:
+                        svc.binary = em.group(1)
+                elif not any(lower.startswith(d) for d in _PATH_DIRECTIVES):
+                    bm = re.search(rf"(/\S*{re.escape(name)})\b", stripped)
+                    if bm and not svc.binary:
+                        svc.binary = bm.group(1)
 
     # ------------------------------------------------------------------
 

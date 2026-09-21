@@ -85,6 +85,21 @@ PLACEHOLDER_VALUES = {
 
 DOC_PATH_RE = re.compile(r"(readme|changelog|docs?/|examples?/|test(s|data)?/|\.md$)", re.I)
 
+# Upstream config files that ship identically on every system built from the
+# same distro. Their example values are real assignments -- OpenSSL's TSA
+# section carries a live `secret = pass:insta` -- but they are the package
+# author's placeholders and say nothing about this image.
+#
+# Deliberately NOT here: nslcd.conf, ldap.conf, pam config, or anything else
+# carrying a bind password. Those are stock by name and device-specific by
+# content, and a credential in one is exactly the finding worth having.
+STOCK_CONFIG_RE = re.compile(
+    r"(^|/)(openssl\.cnf|ssl\.conf|ca-certificates\.conf|nsswitch\.conf|"
+    r"login\.defs|sysctl\.conf|inputrc|profile|bashrc|mime\.types"
+    r")(\.(dist|default|sample|example|orig))?$",
+    re.I,
+)
+
 # Markup and script are code, not configuration. A firmware web root is full
 # of `password: document.getElementById("pwd").value` and every one of those
 # satisfies a naive key=value pattern. Scanning them for "hardcoded
@@ -101,6 +116,21 @@ CODE_TOKENS = (b"document.", b"getelementbyid", b"function", b"return ",
 # A literal secret is a flat token. Brackets, parens, semicolons and angle
 # brackets all mean we captured a fragment of code.
 CODE_CHARS = set(b"()[]{}<>;,")
+
+
+def _line_is_commented(data: bytes, pos: int) -> bool:
+    """
+    True when the match sits on a commented-out line.
+
+    Stock openssl.cnf ships `# input_password = secret` as documentation, and
+    reporting that as a hardcoded credential is the same error class as
+    matching JavaScript: the bytes are real, the claim is not. Checks only
+    the text between the line start and the match, so a `#` appearing later
+    as part of a value does not disqualify it.
+    """
+    start = data.rfind(b"\n", 0, pos) + 1
+    prefix = data[start:pos].lstrip()
+    return prefix[:1] in (b"#", b";") or prefix[:2] == b"//"
 
 
 def _is_literal_secret(val: bytes) -> bool:
@@ -249,6 +279,10 @@ class HardcodedCredentialDetector:
             if val.lower() in PLACEHOLDER_VALUES or len(set(val)) < 3:
                 continue
             if not _is_literal_secret(val):
+                continue
+            if _line_is_commented(data, m.start()):
+                continue
+            if STOCK_CONFIG_RE.search(rel):
                 continue
             yield _Hit(rel, m.start("val"), val, "config_credential",
                        f"{m.group('key').decode(errors='replace')} assigned a literal value")

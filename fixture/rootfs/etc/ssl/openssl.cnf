@@ -1,0 +1,5 @@
+# Passwords for private keys if not present they will be prompted for
+# input_password = secret
+# output_password = secret
+ref = 3078 # user identification
+challengePassword_min = 4
