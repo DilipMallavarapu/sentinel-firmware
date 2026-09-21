@@ -1,0 +1,94 @@
+# Run every suite on every push.
+#
+# The reason this exists: `min_score` in binanalysis.py silently reverted from
+# 17 to 12 in two separate working trees, and nobody noticed until a test was
+# written that asserted it. Thresholds and filters are exactly the kind of
+# thing that comes back after a file replacement, and only a machine running
+# the suites every time will catch it.
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # capstone is the only third-party import the analyzers touch, and
+      # binanalysis degrades gracefully without it -- installed here so the
+      # disassembly path is actually exercised rather than skipped.
+      - name: Install capstone
+        run: pip install --quiet capstone
+
+      # test_analyzers builds its own ELFs and rootfs trees in a temp dir, so
+      # it runs before the fixture exists and proves it has no dependency on
+      # it. The other two do need the fixture.
+      - name: Analyzer suite
+        run: python3 test_analyzers.py
+
+      - name: Build the fixture
+        run: |
+          chmod +x extend_fixture.sh
+          ./extend_fixture.sh
+
+      - name: Regression suite
+        run: python3 test_regressions.py
+
+      - name: Proof gate and checkpoint engine
+        run: python3 smoke_test.py
+
+      # A root-level module that shadows a package module has broken this
+      # project three times: secrets.py shadowed the stdlib and broke every
+      # import, then pipeline.py and services.py silently absorbed edits meant
+      # for the real files. Cheap to check, expensive to miss.
+      - name: No root-level module shadows a package module
+        run: |
+          set -e
+          shadowed=""
+          for f in *.py; do
+            [ -e "$f" ] || continue
+            if find sentinel -name "$f" | grep -q .; then
+              shadowed="$shadowed $f"
+            fi
+          done
+          if [ -n "$shadowed" ]; then
+            echo "root-level files shadow modules under sentinel/:$shadowed" >&2
+            exit 1
+          fi
+          echo "no shadowing"
+
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Vet
+        run: go vet ./go/elfscan
+
+      - name: Build
+        run: go build -o bin/elfscan ./go/elfscan
+
+      # The worker must emit a completion record. A stream that ends early
+      # looks like a clean result and produces false negatives, so the
+      # contract is checked rather than assumed.
+      - name: Output contract
+        run: |
+          set -e
+          out=$(echo '{"root":"/usr/bin","workers":4}' | ./bin/elfscan | tail -1)
+          echo "$out"
+          echo "$out" | grep -q '"_done":true' || {
+            echo "worker did not emit a completion record" >&2; exit 1; }
+          echo "$out" | grep -q '"elfs":[1-9]' || {
+            echo "worker found no ELFs in /usr/bin" >&2; exit 1; }
