@@ -71,10 +71,13 @@ def build(emulate: bool) -> Pipeline:
                    needs=["rootfs"]),
         Checkpoint("backdoor", "Backdoor and hygiene checks",
                    P.stage_backdoor, needs=["rootfs"]),
+        Checkpoint("binanalysis", "Analyse binary internals",
+                   P.stage_binanalysis, needs=["rootfs"], optional=True),
         Checkpoint("elfscan", "Scan binary hardening", P.stage_elfscan,
                    needs=["rootfs", "services"], optional=True),
     ]
-    triage_needs = ["secrets", "elfscan", "services", "backdoor"]
+    triage_needs = ["secrets", "elfscan", "services", "backdoor",
+                    "binanalysis"]
     if emulate:
         stages += [
             Checkpoint("emulate", "Stage for user-mode emulation", P.stage_emulate,

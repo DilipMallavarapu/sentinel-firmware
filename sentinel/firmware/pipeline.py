@@ -167,6 +167,27 @@ def stage_backdoor(run: RunState, cfg: dict) -> CheckpointResult:
                             note=f"{n} findings, {crit} critical")
 
 
+def stage_binanalysis(run: RunState, cfg: dict) -> CheckpointResult:
+    """
+    Look inside the binaries: shell command templates and, where capstone is
+    available, the callsites that use them. See analyzers/binanalysis.py.
+    """
+    from .analyzers.binanalysis import DETECTORS as BIN_DETECTORS, HAVE_CAPSTONE
+    rfs: RootFS = run.config["_rootfs"]
+    ctx = _ctx(run)
+    findings: list[Finding] = []
+    for det in BIN_DETECTORS:
+        if det.applicable(rfs):
+            findings.extend(det.run(rfs, ctx))
+    n = _write_findings(run, "binanalysis", findings)
+    return CheckpointResult(State.OK, outputs={"finding_count": n},
+                            findings=n,
+                            note=(f"{n} binaries build shell commands from "
+                                  f"format strings"
+                                  + ("" if HAVE_CAPSTONE
+                                     else "; capstone absent, templates only")))
+
+
 def stage_elfscan(run: RunState, cfg: dict) -> CheckpointResult:
     rfs: RootFS = run.config["_rootfs"]
     worker = GoWorker("elfscan", search_paths=[Path(cfg.get("bin_dir", "bin"))])
@@ -380,7 +401,7 @@ def stage_triage(run: RunState, cfg: dict) -> CheckpointResult:
     requires a verifier, and no model output is a verifier.
     """
     all_findings: list[dict] = []
-    for stage in ("secrets", "elfscan", "services", "backdoor",
+    for stage in ("secrets", "elfscan", "services", "backdoor", "binanalysis",
                   "reachability", "webscan"):
         p = run.dir(stage) / "findings.jsonl"
         if p.is_file():
@@ -446,6 +467,8 @@ def build_pipeline() -> Pipeline:
                    needs=["rootfs"]),
         Checkpoint("backdoor", "Backdoor and hygiene checks", stage_backdoor,
                    needs=["rootfs"]),
+        Checkpoint("binanalysis", "Analyse binary internals",
+                   stage_binanalysis, needs=["rootfs"], optional=True),
         Checkpoint("elfscan", "Scan binary hardening", stage_elfscan,
                    needs=["rootfs", "services"], optional=True),
         Checkpoint("emulate", "Boot the device under QEMU", stage_emulate,
@@ -457,7 +480,7 @@ def build_pipeline() -> Pipeline:
                    needs=["emulate"], optional=True,
                    gate=lambda run: bool(run.out("emulate", "base_url"))),
         Checkpoint("triage", "Dedupe and verify findings", stage_triage,
-                   needs=["secrets", "elfscan", "services", "backdoor",
+                   needs=["secrets", "elfscan", "services", "backdoor", "binanalysis",
                           "reachability", "webscan"]),
         Checkpoint("report", "Write the report", stage_report, needs=["triage"]),
     ])
