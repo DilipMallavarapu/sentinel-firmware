@@ -316,6 +316,150 @@ check("a rootfs with no front end produces nothing",
 
 
 # ==========================================================================
+section("xref: co-reference in code, not just layout")
+# ==========================================================================
+
+import struct as _st  # noqa: E402
+from sentinel.firmware.analyzers.xref import (  # noqa: E402
+    HAVE_CAPSTONE as _HC, correlate_in_code, resolve_string_refs, rodata_vaddr,
+)
+
+
+def _mips_bin():
+    """
+    Hand-assembled MIPS: one function referencing two strings, a second
+    referencing a third. Addresses are chosen so the low half exceeds 0x7FFF,
+    which exercises the addiu sign extension -- getting that wrong puts every
+    resolved address 64KB out about half the time.
+    """
+    lui = lambda rt, i: 0x3C000000 | (rt << 16) | (i & 0xFFFF)
+    adi = lambda rt, rs, i: 0x24000000 | (rs << 21) | (rt << 16) | (i & 0xFFFF)
+    RO = 0x0041F000
+    strs = [b"gateway\x00", b"iptables -t mangle -i %s -j DROP\x00", b"other\x00"]
+    ro = b"".join(strs)
+    o1, o2, o3 = 0, len(strs[0]), len(strs[0]) + len(strs[1])
+
+    def mat(reg, a):
+        hi, lo = (a >> 16) & 0xFFFF, a & 0xFFFF
+        if lo > 0x7FFF:
+            hi = (hi + 1) & 0xFFFF
+        return [lui(reg, hi), adi(reg, reg, lo)]
+
+    w = ([adi(29, 29, -32)] + mat(4, RO + o1) + mat(5, RO + o2) + [0x03E00008, 0]
+         + [adi(29, 29, -16)] + mat(4, RO + o3) + [0x03E00008, 0])
+    text = b"".join(_st.pack("<I", x) for x in w)
+    eh, shs = 52, 40
+    shstr = b"\x00.shstrtab\x00.rodata\x00.text\x00"
+    ro_off = eh; t_off = ro_off + len(ro); s_off = t_off + len(text)
+    shoff = s_off + len(shstr) + 16
+    h = bytearray(eh); h[0:4] = b"\x7fELF"; h[4] = h[5] = h[6] = 1
+    _st.pack_into("<H", h, 16, 2); _st.pack_into("<H", h, 18, 0x08)
+    _st.pack_into("<I", h, 20, 1); _st.pack_into("<I", h, 32, shoff)
+    _st.pack_into("<H", h, 46, shs); _st.pack_into("<H", h, 48, 4)
+    _st.pack_into("<H", h, 50, 3)
+
+    def sh(no, a, o, sz):
+        b = bytearray(shs)
+        _st.pack_into("<I", b, 0, no); _st.pack_into("<I", b, 12, a)
+        _st.pack_into("<I", b, 16, o); _st.pack_into("<I", b, 20, sz)
+        return bytes(b)
+
+    secs = (sh(0, 0, 0, 0) + sh(11, RO, ro_off, len(ro))
+            + sh(19, 0x00420000, t_off, len(text)) + sh(1, 0, s_off, len(shstr)))
+    return bytes(h) + ro + text + shstr + b"\x00" * 16 + secs, ro_off, o1, o2, o3
+
+
+def _mips_pic_bin():
+    """
+    The form real vendor binaries actually use.
+
+    MIPS PIC reaches a string through the GOT: `lw $v0, -0x7fd8($gp)` where
+    $gp is the GOT address plus 0x7ff0. A resolver that only understands
+    lui/addiu finds nothing on these -- it reported "0 string references" on
+    every Tenda daemon while happily disassembling 24,000 instructions, which
+    looks like a clean result and is not.
+    """
+    lw = lambda rt, rs, off: 0x8C000000 | (rs << 21) | (rt << 16) | (off & 0xFFFF)
+    adi = lambda rt, rs, i: 0x24000000 | (rs << 21) | (rt << 16) | (i & 0xFFFF)
+    RO, GOT, TEXT = 0x0041F000, 0x00410000, 0x00420000
+    strs = [b"gateway\x00", b"iptables -t mangle -i %s -j DROP\x00", b"other\x00"]
+    ro = b"".join(strs)
+    o1, o2, o3 = 0, len(strs[0]), len(strs[0]) + len(strs[1])
+    got = b"".join(_st.pack("<I", a) for a in (RO + o1, RO + o2, RO + o3))
+    gp = GOT + 0x7FF0
+    ix = lambda k: (GOT + k * 4) - gp
+    w = ([adi(29, 29, -32), lw(2, 28, ix(0)), lw(3, 28, ix(1)), 0x03E00008, 0]
+         + [adi(29, 29, -16), lw(2, 28, ix(2)), 0x03E00008, 0])
+    text = b"".join(_st.pack("<I", x) for x in w)
+    eh, shs = 52, 40
+    shstr = b"\x00.shstrtab\x00.rodata\x00.text\x00.got\x00"
+    ro_off = eh; got_off = ro_off + len(ro)
+    t_off = got_off + len(got); s_off = t_off + len(text)
+    shoff = s_off + len(shstr) + 16
+    h = bytearray(eh); h[0:4] = b"\x7fELF"; h[4] = h[5] = h[6] = 1
+    _st.pack_into("<H", h, 16, 2); _st.pack_into("<H", h, 18, 0x08)
+    _st.pack_into("<I", h, 20, 1); _st.pack_into("<I", h, 32, shoff)
+    _st.pack_into("<H", h, 46, shs); _st.pack_into("<H", h, 48, 5)
+    _st.pack_into("<H", h, 50, 3)
+
+    def sh(no, a, o, sz):
+        b = bytearray(shs)
+        _st.pack_into("<I", b, 0, no); _st.pack_into("<I", b, 12, a)
+        _st.pack_into("<I", b, 16, o); _st.pack_into("<I", b, 20, sz)
+        return bytes(b)
+
+    secs = (sh(0, 0, 0, 0) + sh(11, RO, ro_off, len(ro))
+            + sh(19, TEXT, t_off, len(text)) + sh(1, 0, s_off, len(shstr))
+            + sh(25, GOT, got_off, len(got)))
+    return (bytes(h) + ro + got + text + shstr + b"\x00" * 16 + secs,
+            ro_off, o1, o2, o3)
+
+
+check("capstone is available for xref", _HC)
+if _HC:
+    _bin, _ro_off, _o1, _o2, _o3 = _mips_bin()
+    _view = parse_elf(_bin)
+    _offs = {"gateway": _ro_off + _o1, "template": _ro_off + _o2,
+             "other": _ro_off + _o3}
+    _res = resolve_string_refs(_view, {rodata_vaddr(_view, o) for o in _offs.values()})
+    check("every lui/addiu reference is resolved", "3 string references" in _res.note)
+    check("function boundaries are found from the prologue",
+          "2 functions" in _res.note)
+
+    _pairs = correlate_in_code(_bin, _offs)
+    check("the shared function is identified", len(_pairs) == 1)
+    check("it names both strings",
+          _pairs and _pairs[0][0] == ["gateway", "template"])
+    check("it reports the instruction addresses that load them",
+          _pairs and all(v for v in _pairs[0][2].values()))
+    # A string used by a different function must not be swept in -- that is
+    # precisely the false pairing .rodata adjacency produces.
+    check("a string in another function is not co-referenced",
+          _pairs and "other" not in _pairs[0][0])
+
+    # Capstone prints small immediates in decimal and large ones in hex.
+    # Matching only the hex form dropped every reference whose low half was
+    # a single digit.
+    # The addressing mode vendor binaries actually use.
+    _pb, _pro, _p1, _p2, _p3 = _mips_pic_bin()
+    _poffs = {"gateway": _pro + _p1, "template": _pro + _p2, "other": _pro + _p3}
+    _pv = parse_elf(_pb)
+    _pres = resolve_string_refs(_pv, {rodata_vaddr(_pv, o) for o in _poffs.values()})
+    check("GOT-relative references resolve", "3 string references" in _pres.note)
+    _ppairs = correlate_in_code(_pb, _poffs)
+    check("the shared function is found in a PIC binary", len(_ppairs) == 1)
+    check("PIC pairing names both strings",
+          _ppairs and _ppairs[0][0] == ["gateway", "template"])
+    check("PIC does not sweep in the other function's string",
+          _ppairs and "other" not in _ppairs[0][0])
+
+    from sentinel.firmware.analyzers.xref import _imm  # noqa: E402
+    check("decimal immediates parse", _imm("$a0, $a0, 8") == 8)
+    check("hex immediates parse", _imm("$a0, $a0, 0x4f30") == 0x4F30)
+    check("negative immediates parse", _imm("$sp, $sp, -32") == -32)
+
+
+# ==========================================================================
 section("backdoor: literature-derived detectors")
 # ==========================================================================
 
