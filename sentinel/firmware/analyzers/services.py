@@ -57,17 +57,48 @@ SERVICE_BINARIES = {
     "miniupnpd": (1900, Severity.MEDIUM, "upnp"),
 }
 
+def _enabled_services(rootfs) -> set[str] | None:
+    """
+    Names enabled via runlevel symlinks, or None when the image uses no
+    such scheme.
+
+    OpenWrt and sysvinit both ship init scripts for software that is
+    installed but switched off, and enable them with an S-prefixed symlink
+    in /etc/rc.d (procd) or /etc/rc?.d (sysvinit). Reading /etc/init.d alone
+    reports miniupnpd and upnpd as autostarting on an image where neither
+    runs -- a false positive that inflates the attack surface of exactly the
+    services an operator cares about.
+    """
+    roots = [rootfs.root / "etc" / "rc.d"]
+    roots += [rootfs.root / "etc" / f"rc{n}.d" for n in range(7)]
+    found, any_dir = set(), False
+    for d in roots:
+        if not d.is_dir():
+            continue
+        any_dir = True
+        for entry in d.iterdir():
+            n = entry.name
+            # S = start, K = stop. An enabled service usually has both (start
+            # order and shutdown order); a disabled one has only K. Counting
+            # K as enablement made every installed-but-off service look like
+            # it autostarts, which is the exact false positive this function
+            # exists to remove.
+            if n[:1] == "S":
+                found.add(n.lstrip("S0123456789"))
+    return found if any_dir else None
+
+
 def _is_text_config(raw: bytes) -> bool:
     """
     Reject anything that is not a plain-text script or config.
 
-    /init and /sbin/init are symlinks to busybox on most embedded images, and
-    busybox embeds a table of every applet it was compiled with. Treating
-    that as init configuration "discovers" telnetd, ftpd and httpd on every
-    busybox image ever built, whether or not any of them start.
+    The specific trap: /init and /sbin/init are symlinks to busybox on most
+    embedded images, and busybox embeds a table of every applet name it was
+    compiled with. Treating that as init configuration reports telnetd, ftpd,
+    httpd and friends as autostarting on every busybox image in existence.
     """
-    if raw[:4] == b"\x7fELF":
-        return False
+    if raw[:4] == b"\x7fELF" or raw[:2] == b"#!" and b"\x00" in raw[:512]:
+        return raw[:4] != b"\x7fELF" and b"\x00" not in raw[:512]
     head = raw[:4096]
     if b"\x00" in head:
         return False
@@ -112,12 +143,14 @@ class ServiceAnalyzer:
 
     def discover(self, rootfs: RootFS) -> list[Service]:
         services: dict[str, Service] = {}
+        enabled = _enabled_services(rootfs)
         for rel in INIT_DIRS:
             base = rootfs.root / rel
             if not base.exists():
                 continue
             files = [base] if base.is_file() else [
-                p for p in base.rglob("*") if p.is_file() and p.stat().st_size < (1 << 20)
+                p for p in base.rglob("*")
+                if p.is_file() and p.stat().st_size < (1 << 20)
             ]
             for f in files:
                 try:
@@ -128,6 +161,15 @@ class ServiceAnalyzer:
                     continue
                 self._scan_text(raw.decode("utf-8", "replace"), f, rootfs,
                                 services)
+
+        # Where the image expresses enablement, respect it. Where it does not
+        # (no rc.d at all), every script is assumed to run, as before.
+        if enabled is not None:
+            for name, svc in services.items():
+                if not any(name in e or e in name for e in enabled):
+                    svc.autostart = False
+                    svc.evidence.append(
+                        "no rc.d symlink: installed but not enabled")
         return list(services.values())
 
     def _scan_text(self, text: str, path: Path, rootfs: RootFS,
@@ -162,32 +204,32 @@ class ServiceAnalyzer:
 
     # ------------------------------------------------------------------
 
-    def orphan_binaries(self, services, rootfs):
+    def orphan_binaries(self, services: list[Service],
+                        rootfs: RootFS) -> list[str]:
         """
         Service binaries present in the image that no init config mentions.
 
-        The honest answer to a hard limit. Tenda and many other vendors start
-        their daemons from compiled code -- /init is busybox, rcS hands off to
-        a proprietary supervisor, and nothing in any text file names httpd.
-        Static config parsing cannot follow that, and reporting "0 services"
-        silently implies the device has no network surface, which is the most
-        dangerous output this analyzer can produce.
+        This is the honest answer to a hard limit. Tenda and many other
+        vendors start their daemons from compiled code -- /init is busybox,
+        rcS hands off to a proprietary supervisor, and nothing in any text
+        file names httpd. Static config parsing cannot follow that, and
+        reporting "0 services" silently implies the device has no network
+        surface, which is the most dangerous output this analyzer can give.
 
         So: name the binaries we can see, say we could not find what starts
         them, and point at the stage that can answer it.
         """
         named = {s.name for s in services}
-        found = []
+        found: list[str] = []
         for entry in rootfs.walk(max_size=32 << 20):
             base = entry.rel.rsplit("/", 1)[-1]
-            if base not in SERVICE_BINARIES or base in named:
-                continue
-            if entry.is_symlink or not entry.executable:
-                continue
-            found.append(entry.rel)
+            if base in SERVICE_BINARIES and base not in named \
+                    and entry.executable and not entry.is_symlink:
+                found.append(entry.rel)
         return sorted(set(found))
 
-    def coverage_finding(self, orphans, services, rootfs, ctx):
+    def coverage_finding(self, orphans: list[str], services: list[Service],
+                         rootfs: RootFS, ctx: RunContext) -> Finding | None:
         if not orphans:
             return None
         return Finding(
@@ -201,11 +243,11 @@ class ServiceAnalyzer:
                 "These daemons are in the image but nothing in any readable "
                 "init script, inittab or config references them, so this "
                 "analyzer cannot say whether they run, on which ports, or as "
-                "which user. Where /init is busybox and startup is driven "
-                "from compiled code, that is expected rather than a parsing "
-                "failure. Treat the attack surface as unknown, not absent, "
-                "and resolve it by emulating the image or by reversing "
-                "whatever rcS hands control to."
+                "which user. On images where /init is busybox and startup is "
+                "driven from compiled code, that is expected rather than a "
+                "parsing failure. Treat the attack surface as unknown, not "
+                "absent, and resolve it by emulating the image or by "
+                "reversing whatever rcS hands control to."
             ),
             confidence=Confidence.PROBABLE,
             context={
@@ -220,6 +262,8 @@ class ServiceAnalyzer:
     def findings(self, services: list[Service], rootfs: RootFS,
                  ctx: RunContext) -> Iterable[Finding]:
         for svc in services:
+            if not svc.autostart:
+                continue          # installed, not enabled
             _, sev, why = SERVICE_BINARIES.get(svc.name, (None, Severity.INFO, ""))
             if sev in (Severity.INFO,) and svc.runs_as not in (None, "root"):
                 continue

@@ -238,6 +238,30 @@ check("command-template findings never reach confirmed",
 
 
 # ==========================================================================
+# OpenWrt ships init scripts for software that is installed but switched
+# off, and enables them with an S-prefixed symlink in /etc/rc.d. K means
+# stop. Reading /etc/init.d alone reported miniupnpd and upnpd as
+# autostarting on an image where neither runs.
+from sentinel.firmware.analyzers.services import ServiceAnalyzer as _SA  # noqa: E402
+
+_rc = rootfs_with({
+    "etc/init.d/dropbear": b"#!/bin/sh /etc/rc.common\nSTART=19\n",
+    "etc/init.d/miniupnpd": b"#!/bin/sh /etc/rc.common\nSTART=95\n",
+    "etc/rc.d/S19dropbear": b"#!/bin/sh\n",
+    "etc/rc.d/K50dropbear": b"#!/bin/sh\n",
+    "etc/rc.d/K95miniupnpd": b"#!/bin/sh\n",
+}, "rcdroot")
+_svcs = {s.name: s for s in _SA().discover(_rc)}
+check("a service with an S symlink is autostart",
+      _svcs.get("dropbear") and _svcs["dropbear"].autostart)
+check("a service with only a K symlink is not autostart",
+      _svcs.get("miniupnpd") and not _svcs["miniupnpd"].autostart)
+
+_noRc = rootfs_with({"etc/init.d/rcS": b"#!/bin/sh\n/bin/telnetd &\n"}, "norcd")
+check("an image with no rc.d still reports its services",
+      any(s.name == "telnetd" and s.autostart for s in _SA().discover(_noRc)))
+
+
 section("sharedkeys: the front end / back end bridge")
 # ==========================================================================
 

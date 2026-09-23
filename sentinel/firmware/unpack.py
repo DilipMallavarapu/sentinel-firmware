@@ -196,7 +196,11 @@ def identify(rootfs: RootFS) -> RootFS:
                 rootfs.arch = "mipsel"
     if rootfs.find("lib/ld-uClibc.so.0", "lib/libuClibc.so.0"):
         rootfs.libc = "uclibc"
-    elif rootfs.find("lib/ld-musl-armhf.so.1", "lib/ld-musl-x86_64.so.1"):
+    elif (rootfs.root / "lib").is_dir() and any(
+            (rootfs.root / "lib").glob("ld-musl-*.so.*")):
+        # ld-musl-<arch>.so.1 where <arch> is mipsel-sf, armhf, x86_64 and a
+        # dozen others. Naming two of them meant every musl MIPS image --
+        # most of OpenWrt -- reported an unknown libc.
         rootfs.libc = "musl"
     elif rootfs.find("lib/libc.so.6"):
         rootfs.libc = "glibc"

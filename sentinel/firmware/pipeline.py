@@ -357,12 +357,15 @@ def stage_reachability(run: RunState, cfg: dict) -> CheckpointResult:
         except Exception as exc:
             dead += 1
             continue
+        # A binary that produced no output did not run under emulation. It
+        # must not also be counted as executed -- the note read "5 ran, 0
+        # reflect input, 5 would not run", which is not a possible state.
+        if not res.probe_transcript.stdout and (
+                res.probe_transcript.timed_out
+                or res.probe_transcript.status not in (0, None)):
+            dead += 1
+            continue
         executed += 1
-
-        if res.probe_transcript.timed_out or res.probe_transcript.status not in (0, None):
-            if not res.probe_transcript.stdout:
-                dead += 1
-                continue
 
         if not res.diverged:
             continue
