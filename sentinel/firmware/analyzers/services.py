@@ -88,6 +88,24 @@ def _enabled_services(rootfs) -> set[str] | None:
     return found if any_dir else None
 
 
+def _service_from_filename(rel: str) -> str | None:
+    """
+    The service a script IS, as opposed to services it mentions.
+
+    An OpenWrt init script is `#!/bin/sh /etc/rc.common` plus a START=
+    number -- the daemon's name appears only in the filename. Matching on
+    body text alone found dropbear and uhttpd on a real image purely because
+    those strings turned up in unrelated config files, and found nothing at
+    all when they did not.
+    """
+    parts = rel.replace("\\", "/").split("/")
+    if not any(seg in ("init.d", "rc.d") or seg.startswith("rc")
+               for seg in parts[:-1]):
+        return None
+    name = parts[-1].lstrip("SK0123456789")
+    return name if name in SERVICE_BINARIES else None
+
+
 def _is_text_config(raw: bytes) -> bool:
     """
     Reject anything that is not a plain-text script or config.
@@ -157,6 +175,18 @@ class ServiceAnalyzer:
                     raw = f.read_bytes()
                 except OSError:
                     continue
+                rel_f = str(f.relative_to(rootfs.root))
+
+                # A script's own name registers the service before its body
+                # is read at all.
+                own = _service_from_filename(rel_f)
+                if own:
+                    svc = services.setdefault(own, Service(name=own))
+                    svc.autostart = True
+                    svc.config_paths.append(rel_f)
+                    svc.evidence.append(f"{rel_f}: init script for {own}")
+                    svc.port = svc.port or SERVICE_BINARIES[own][0]
+
                 if not _is_text_config(raw):
                     continue
                 self._scan_text(raw.decode("utf-8", "replace"), f, rootfs,
