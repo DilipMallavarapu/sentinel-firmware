@@ -55,6 +55,30 @@ SERVICE_BINARIES = {
     "snmpd": (161, Severity.LOW, "snmp"),
     "upnpd": (1900, Severity.MEDIUM, "upnp"),
     "miniupnpd": (1900, Severity.MEDIUM, "upnp"),
+    # From the OpenWrt control image: 23 enabled services, of which this
+    # table recognised two. These are network-facing and were invisible.
+    "dnsmasq": (53, Severity.LOW, "dns and dhcp server"),
+    "odhcpd": (547, Severity.LOW, "dhcpv6 server"),
+    "rpcd": (None, Severity.MEDIUM, "json-rpc backend for the web ui"),
+    "sysntpd": (123, Severity.INFO, "ntp"),
+    "ntpd": (123, Severity.INFO, "ntp"),
+    "avahi-daemon": (5353, Severity.LOW, "mdns"),
+    "mdnsd": (5353, Severity.LOW, "mdns"),
+    "smbd": (445, Severity.MEDIUM, "smb file sharing"),
+    "nmbd": (137, Severity.LOW, "netbios"),
+    "minidlna": (8200, Severity.LOW, "dlna media server"),
+    "transmission-daemon": (9091, Severity.MEDIUM, "bittorrent rpc"),
+    "hostapd": (None, Severity.INFO, "wifi authenticator"),
+    "wpa_supplicant": (None, Severity.INFO, "wifi supplicant"),
+    "openvpn": (1194, Severity.LOW, "vpn"),
+    "pptpd": (1723, Severity.MEDIUM, "pptp vpn (weak by design)"),
+    "l2tpd": (1701, Severity.LOW, "l2tp"),
+    "xl2tpd": (1701, Severity.LOW, "l2tp"),
+    "stunnel": (None, Severity.LOW, "tls wrapper"),
+    "lldpd": (None, Severity.INFO, "link discovery"),
+    "zebra": (2601, Severity.MEDIUM, "routing daemon"),
+    "bftpd": (21, Severity.MEDIUM, "cleartext file transfer"),
+    "proftpd": (21, Severity.MEDIUM, "cleartext file transfer"),
 }
 
 def _enabled_services(rootfs) -> set[str] | None:
