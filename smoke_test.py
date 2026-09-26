@@ -44,7 +44,7 @@ def check(label, cond):
     print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
 
 
-print("\n== 1. CONFIRMED requires a verifying proof ==")
+print("\n1. CONFIRMED requires a verifying proof")
 f = Finding(detector_id="t", title="t", severity=Severity.HIGH,
             axis=Axis.PRESENCE, target="etc/shadow")
 check("new finding defaults to CANDIDATE", f.confidence == Confidence.CANDIDATE)
@@ -67,7 +67,7 @@ except UnverifiableProof:
     check("unknown proof kind is rejected", True)
 
 
-print("\n== 2. Credential detector on the fixture ==")
+print("\n2. Credential detector on the fixture")
 rfs = identify(RootFS(root=FIXTURE))
 print(f"  identified: arch={rfs.arch} libc={rfs.libc} init={rfs.init_system}")
 findings = list(HardcodedCredentialDetector().run(rfs, ctx))
@@ -109,7 +109,7 @@ check("that finding records all three accounts",
       any(x.target == "etc_ro/passwd" and x.context.get("occurrences") == 3
           for x in findings))
 
-print("\n== 3. Proofs survive an audit, and tampering breaks them ==")
+print("\n3. Proofs survive an audit, and tampering breaks them")
 reverified = all(verify_proof(x.proof, RUNDIR) for x in confirmed)
 check("every CONFIRMED proof re-verifies offline", reverified)
 
@@ -131,7 +131,7 @@ check("restoring the evidence makes it verify again",
       verify_proof(victim.proof, RUNDIR) is True)
 
 
-print("\n== 4. Service discovery ==")
+print("\n4. Service discovery")
 an = ServiceAnalyzer()
 services = an.discover(rfs)
 svc_findings = list(an.findings(services, rfs, ctx))
@@ -148,7 +148,7 @@ check("services under etc_ro/init.d are discovered",
       any(s.name == "httpd" for s in services))
 
 
-print("\n== 5. Checkpoint engine: resume and blocking ==")
+print("\n5. Checkpoint engine: resume and blocking")
 calls = []
 pipe = Pipeline([
     Checkpoint("a", "Stage A", lambda r, c: (calls.append("a"),

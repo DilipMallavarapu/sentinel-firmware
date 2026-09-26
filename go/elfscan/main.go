@@ -44,16 +44,41 @@ type Request struct {
 	SkipGlobs   []string `json:"skip_globs"`
 }
 
+// State is the three-valued result of a symbol-derived mitigation check.
+// A missing symbol table means "we could not look", which is *unknown*, not
+// *absent*: reporting unknown as absent is the specific lie this worker used
+// to tell on sstripped images, and the reason the aggregate later read 0/54
+// when the true figure was the opposite.
+type State string
+
+const (
+	Present State = "present"
+	Absent  State = "absent"
+	Unknown State = "unknown"
+)
+
 type Mitigations struct {
-	NX          bool   `json:"nx"`
-	PIE         bool   `json:"pie"`
-	RELRO       string `json:"relro"` // "none" | "partial" | "full"
-	Canary      bool   `json:"canary"`
-	Fortify     bool   `json:"fortify"`
-	Stripped    bool   `json:"stripped"`
-	RPath       string `json:"rpath,omitempty"`
-	RunPath     string `json:"runpath,omitempty"`
-	TextRelocs  bool   `json:"text_relocs"`
+	NX         bool   `json:"nx"`  // phdr-derived: always determinable
+	PIE        bool   `json:"pie"` // phdr-derived: always determinable
+	RELRO      string `json:"relro"` // "none" | "partial" | "full"
+	Canary     State  `json:"canary"`  // symbol-derived: present|absent|unknown
+	Fortify    State  `json:"fortify"` // symbol-derived: present|absent|unknown
+	Stripped   bool   `json:"stripped"`
+	RPath      string `json:"rpath,omitempty"`
+	RunPath    string `json:"runpath,omitempty"`
+	TextRelocs bool   `json:"text_relocs"`
+}
+
+// SymEvidence records *how* the canary/fortify verdict was reached and where
+// the searched bytes live, so the Python side can build a proof artifact that
+// re-derives the verdict offline rather than re-proving the ELF header (which
+// says nothing about symbols). All offsets are absolute file offsets.
+type SymEvidence struct {
+	Source    string `json:"source"`               // "dynamic-strtab" | "symtab-section" | "none"
+	StrtabOff int64  `json:"strtab_off,omitempty"` // start of the region searched
+	StrtabLen int64  `json:"strtab_len,omitempty"` // length of the region searched
+	CanaryOff int64  `json:"canary_off,omitempty"` // file offset of the matched token, when present
+	Reason    string `json:"reason,omitempty"`     // why the verdict is unknown
 }
 
 type Record struct {
@@ -64,6 +89,7 @@ type Record struct {
 	Type        string      `json:"type"`
 	Interp      string      `json:"interp,omitempty"`
 	Mitigations *Mitigations `json:"mitigations,omitempty"`
+	SymEv       *SymEvidence `json:"sym_evidence,omitempty"`
 	RiskyIn     []string    `json:"risky_imports,omitempty"`
 	NeedLibs    []string    `json:"needed,omitempty"`
 	SetUID      bool        `json:"setuid"`
@@ -232,7 +258,19 @@ func inspect(root, path string) (Record, bool) {
 	rec.Arch = f.Machine.String()
 	rec.Type = f.Type.String()
 	m := mitigations(f)
+	// Canary/fortify are symbol-derived and must survive section stripping;
+	// scanSymbols reads the dynamic string table straight from PT_DYNAMIC so
+	// an sstripped binary yields a real verdict, not a false "absent".
+	ev := scanSymbols(f)
+	m.Canary, m.Fortify = ev.canary, ev.fortify
 	rec.Mitigations = &m
+	rec.SymEv = &SymEvidence{
+		Source:    ev.source,
+		StrtabOff: ev.regionOff,
+		StrtabLen: ev.regionLen,
+		CanaryOff: ev.canaryOff,
+		Reason:    ev.reason,
+	}
 	rec.Interp = interp(f)
 
 	if libs, err := f.ImportedLibraries(); err == nil {
@@ -303,17 +341,163 @@ func mitigations(f *elf.File) Mitigations {
 		}
 	}
 
-	names := allSymbolNames(f)
-	for _, n := range names {
-		base := strings.TrimSuffix(strings.TrimPrefix(n, "__"), "@GLIBC_2.4")
-		if strings.HasPrefix(base, "stack_chk_fail") {
-			m.Canary = true
+	// Canary/fortify are filled in by scanSymbols at the call site; they are
+	// left at their zero value ("") here so a caller that forgets is visibly
+	// wrong rather than silently reporting a false "absent".
+	return m
+}
+
+// symResult carries the tri-state verdicts plus enough provenance for the
+// Python side to persist a re-derivable proof.
+type symResult struct {
+	canary    State
+	fortify   State
+	source    string
+	reason    string
+	regionOff int64 // absolute file offset of the searched byte region
+	regionLen int64
+	canaryOff int64 // absolute file offset of the matched canary token, if present
+}
+
+// scanSymbols decides canary/fortify presence from symbol *names*, the same
+// signal checksec uses. The name of an imported function is only present in a
+// binary's string table if a relocation references it, so "__stack_chk_fail"
+// in .dynstr means at least one function was compiled with -fstack-protector.
+//
+// The key difference from the old code: it reads .dynstr directly from the
+// PT_DYNAMIC segment (DT_STRTAB/DT_STRSZ), which survives `sstrip`. Only when
+// there is no dynamic string table *and* no section symbol table do we admit
+// we cannot tell and return Unknown with a reason.
+func scanSymbols(f *elf.File) symResult {
+	// Primary: the dynamic string table, read from the segment not the
+	// (possibly stripped) sections. This is the path that fixes OpenWrt.
+	if region, off, ok := dynStrTab(f); ok {
+		r := symResult{
+			source: "dynamic-strtab", regionOff: off, regionLen: int64(len(region)),
+			canary: Absent, fortify: Absent,
 		}
-		if strings.HasSuffix(base, "_chk") {
-			m.Fortify = true
+		scanTokens(region, off, &r)
+		return r
+	}
+
+	// Fallback: a statically linked binary that still has a .symtab section
+	// (i.e. not stripped) can be read through debug/elf. The searched region
+	// is synthesized from the names, so the proof is derived-not-raw; that is
+	// noted in the source string and is still deterministic offline.
+	if names := allSymbolNames(f); len(names) > 0 {
+		region := []byte(strings.Join(names, "\x00") + "\x00")
+		r := symResult{
+			source: "symtab-section", regionOff: 0, regionLen: int64(len(region)),
+			canary: Absent, fortify: Absent,
+		}
+		scanTokens(region, 0, &r)
+		return r
+	}
+
+	// Neither source exists: statically linked and stripped, or a symbol
+	// table we could not locate. This is genuinely unknown -- the honest
+	// verdict the old code refused to give.
+	return symResult{
+		canary: Unknown, fortify: Unknown, source: "none",
+		reason: "no dynamic string table (DT_STRTAB) and no symbol section; " +
+			"symbol-derived mitigations are unmeasurable for this binary",
+	}
+}
+
+// scanTokens splits a NUL-delimited string table and applies the canary /
+// fortify name tests to each token, recording the file offset of the canary
+// token so the proof can point straight at it.
+func scanTokens(region []byte, regionOff int64, r *symResult) {
+	pos := 0
+	for pos < len(region) {
+		end := pos
+		for end < len(region) && region[end] != 0 {
+			end++
+		}
+		if end > pos {
+			tok := string(region[pos:end])
+			base := strings.TrimSuffix(strings.TrimPrefix(tok, "__"), "@GLIBC_2.4")
+			if strings.HasPrefix(base, "stack_chk") {
+				r.canary = Present
+				r.canaryOff = regionOff + int64(pos)
+			}
+			if strings.HasSuffix(base, "_chk") {
+				r.fortify = Present
+			}
+		}
+		pos = end + 1
+	}
+}
+
+// dynStrTab returns the .dynstr bytes and their absolute file offset, read
+// from the PT_DYNAMIC segment so it does not depend on section headers.
+// Returns ok=false when there is no dynamic segment or it does not describe a
+// string table that lands inside a loadable segment.
+func dynStrTab(f *elf.File) (region []byte, fileOff int64, ok bool) {
+	var dyn *elf.Prog
+	for _, p := range f.Progs {
+		if p.Type == elf.PT_DYNAMIC {
+			dyn = p
+			break
 		}
 	}
-	return m
+	if dyn == nil || dyn.Filesz == 0 || dyn.Filesz > (16<<20) {
+		return nil, 0, false
+	}
+	raw := make([]byte, dyn.Filesz)
+	if _, err := dyn.ReadAt(raw, 0); err != nil {
+		return nil, 0, false
+	}
+
+	bo := f.ByteOrder
+	var strtabVA, strsz uint64
+	var haveStr bool
+	if f.Class == elf.ELFCLASS32 {
+		for i := 0; i+8 <= len(raw); i += 8 {
+			tag := elf.DynTag(int32(bo.Uint32(raw[i:])))
+			val := uint64(bo.Uint32(raw[i+4:]))
+			switch tag {
+			case elf.DT_STRTAB:
+				strtabVA, haveStr = val, true
+			case elf.DT_STRSZ:
+				strsz = val
+			case elf.DT_NULL:
+				i = len(raw) // stop
+			}
+		}
+	} else {
+		for i := 0; i+16 <= len(raw); i += 16 {
+			tag := elf.DynTag(int64(bo.Uint64(raw[i:])))
+			val := bo.Uint64(raw[i+8:])
+			switch tag {
+			case elf.DT_STRTAB:
+				strtabVA, haveStr = val, true
+			case elf.DT_STRSZ:
+				strsz = val
+			case elf.DT_NULL:
+				i = len(raw)
+			}
+		}
+	}
+	if !haveStr || strsz == 0 || strsz > (64<<20) {
+		return nil, 0, false
+	}
+
+	// DT_STRTAB is a virtual address; map it back to a file offset through the
+	// loadable segment that contains it.
+	for _, p := range f.Progs {
+		if p.Type != elf.PT_LOAD {
+			continue
+		}
+		if strtabVA >= p.Vaddr && strtabVA+strsz <= p.Vaddr+p.Filesz {
+			buf := make([]byte, strsz)
+			if _, err := p.ReadAt(buf, int64(strtabVA-p.Vaddr)); err != nil {
+				return nil, 0, false
+			}
+			return buf, int64(p.Off) + int64(strtabVA-p.Vaddr), true
+		}
+	}
+	return nil, 0, false
 }
 
 func interp(f *elf.File) string {

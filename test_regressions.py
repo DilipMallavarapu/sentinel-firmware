@@ -33,7 +33,7 @@ def check(label, cond):
     print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
 
 
-print("\n== Unit: the regexes and helpers ==")
+print("\nUnit: the regexes and helpers")
 # Tenda AC6: `samba_passwd=` is empty, and \s in the value pattern matches
 # newlines, so it captured `ses_cl_enable=1` from the line below. Nineteen
 # confirmed findings in one run came from that single character.
@@ -73,7 +73,7 @@ check("critical outranks high in dedupe",
 check("string order would have got this wrong",
       ("critical" > "high") is False)
 
-print("\n== Integration: the fixture ==")
+print("\nIntegration: the fixture")
 fixture = HERE / "fixture" / "rootfs"
 if not fixture.is_dir():
     print("  fixture missing; run ./extend_fixture.sh first")

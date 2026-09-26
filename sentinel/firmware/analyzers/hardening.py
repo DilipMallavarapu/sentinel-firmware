@@ -41,6 +41,80 @@ from ..models import RootFS, Service
 INTERESTING_DIRS = ("bin/", "sbin/", "usr/bin/", "usr/sbin/", "www/", "cgi-bin/")
 
 
+def _canary_state(rec: dict) -> str:
+    """Normalize the worker's canary verdict to present|absent|unknown.
+
+    New worker output is already one of those three strings. Records from
+    before the three-state change stored a bool; a bare True is honestly
+    "present", but a bare False is *not* honestly "absent" -- that was the
+    exact false-negative we are fixing -- so it maps to "unknown" here rather
+    than silently re-asserting the old lie against stale data.
+    """
+    v = (rec.get("mitigations") or {}).get("canary")
+    if v in ("present", "absent", "unknown"):
+        return v
+    if v is True:
+        return "present"
+    return "unknown"
+
+
+def _build_canary_proof(rec: dict, rootfs: "RootFS", ctx: "RunContext"):
+    """Build a symbol_presence proof that re-derives the canary verdict from
+    the exact bytes searched -- the string table region for present/absent, or
+    the ELF header + program headers for unknown. Returns None when the
+    evidence cannot be captured (e.g. the derived-not-raw symtab-section path,
+    where there is no raw file region to store)."""
+    ev = rec.get("sym_evidence") or {}
+    src = ev.get("source")
+    path = rec.get("path", "")
+    fp = rootfs.root / path
+    if not fp.is_file():
+        return None
+    state = _canary_state(rec)
+
+    if src == "dynamic-strtab" and int(ev.get("strtab_len", 0)) > 0:
+        off, ln = int(ev["strtab_off"]), int(ev["strtab_len"])
+        try:
+            with open(fp, "rb") as fh:
+                fh.seek(off)
+                region = fh.read(ln)
+        except OSError:
+            return None
+        if len(region) != ln:
+            return None
+        rel = ctx.store_blob(f"{path.replace('/', '_')}.dynstr", region)
+        claim = {"blob": rel, "region_sha256": hashlib.sha256(region).hexdigest(),
+                 "result": state, "needle": "stack_chk", "region_file_offset": off}
+        if state == "present":
+            claim["match_off_in_region"] = int(ev.get("canary_off", 0)) - off
+        return ProofArtifact(kind="symbol_presence", claim=claim, blobs=[rel])
+
+    if src == "none" and state == "unknown":
+        # The unknown verdict is "no symbol section and no readable dynstr",
+        # which can only be re-derived by walking the section and program
+        # header tables -- so the evidence is the whole ELF. Bounded: a
+        # statically linked, stripped helper (the case that lands here) is
+        # small; anything over the cap is left PROBABLE rather than storing a
+        # partial file the verifier could not trust.
+        try:
+            size = fp.stat().st_size
+        except OSError:
+            return None
+        if size > (8 << 20):
+            return None
+        try:
+            data = fp.read_bytes()
+        except OSError:
+            return None
+        rel = ctx.store_blob(f"{path.replace('/', '_')}.elf", data)
+        return ProofArtifact(
+            kind="symbol_presence",
+            claim={"blob": rel, "region_sha256": hashlib.sha256(data).hexdigest(),
+                   "result": "unknown", "reason": ev.get("reason", "")},
+            blobs=[rel])
+    return None
+
+
 class HardeningAnalyzer:
     meta = DetectorMeta(
         id="fw.binary.hardening",
@@ -49,7 +123,7 @@ class HardeningAnalyzer:
         axis=Axis.PRESENCE,
         lane="firmware",
         cwe="CWE-1277",
-        proof_kinds=["byte_match"],
+        proof_kinds=["byte_match", "symbol_presence"],
         can_confirm=True,
         tags=["hardening", "binary", "go-worker"],
     )
@@ -84,20 +158,21 @@ class HardeningAnalyzer:
             (s.binary or "").lstrip("/") for s in services if s.binary
         }
 
-        # -- aggregate posture ----------------------------------------
+        n = len(exe)
+
+        # -- aggregate posture: phdr-derived mitigations --------------
+        # NX/PIE/RELRO come from the program headers and the dynamic segment,
+        # both of which survive section stripping, so these are always a clean
+        # two-valued present/absent count.
         tally = Counter()
         for r in exe:
             m = r.get("mitigations") or {}
             tally["nx"] += bool(m.get("nx"))
             tally["pie"] += bool(m.get("pie"))
-            tally["canary"] += bool(m.get("canary"))
             tally["full_relro"] += m.get("relro") == "full"
-            tally["fortify"] += bool(m.get("fortify"))
-        n = len(exe)
 
         for key, label, sev in [
             ("nx", "non-executable stack", Severity.MEDIUM),
-            ("canary", "stack canaries", Severity.MEDIUM),
             ("pie", "position-independent executables", Severity.LOW),
             ("full_relro", "full RELRO", Severity.LOW),
         ]:
@@ -139,6 +214,86 @@ class HardeningAnalyzer:
                                   "the inventory artifact"],
             )
 
+        # -- aggregate posture: canaries (three-state, with a denominator) --
+        # Canaries are symbol-derived, so an unreadable symbol table means we
+        # could not measure -- not that the mitigation is absent. Every number
+        # below therefore carries the population it was computed over. The
+        # coverage percentage is taken over *measured* binaries only; folding
+        # the unknowns into the denominator would understate coverage exactly
+        # the way the old symbol reader did when it called them all absent.
+        cstate = Counter(_canary_state(r) for r in exe)
+        present, absent, unknown = cstate["present"], cstate["absent"], cstate["unknown"]
+        measured = present + absent
+        if unknown:
+            ctx.emit("coverage", {
+                "stage": "hardening",
+                "mitigation": "canary",
+                "measured": measured,
+                "unknown": unknown,
+                "note": "symbol table unreadable on these binaries; canary "
+                        "posture is unmeasured, not absent",
+            })
+        pct = (present / measured) * 100 if measured else None
+        breakdown = (f"{present} present, {absent} absent, {unknown} unknown "
+                     f"(symbol table unreadable) of {n} executables")
+        # When nothing could be measured this is an instrument/coverage gap,
+        # not a vendor defect, and must not be dressed up as one.
+        if measured == 0:
+            yield Finding(
+                detector_id=self.meta.id,
+                title=f"Image-wide: stack-canary posture unmeasurable ({unknown}/{n})",
+                severity=Severity.INFO,
+                axis=Axis.PRESENCE,
+                target=str(rootfs.root.name),
+                summary=(
+                    f"Stack canaries: {breakdown}. No executable exposed a "
+                    f"readable symbol table (statically linked and stripped), "
+                    f"so canary coverage could not be determined for this "
+                    f"image. This is a measurement gap, not a finding of "
+                    f"absence."
+                ),
+                confidence=Confidence.PROBABLE,
+                cwe=self.meta.cwe,
+                context={"locus": {"scope": "image", "mitigation": "canary"},
+                         "executables": n, "present": present, "absent": absent,
+                         "unknown": unknown, "measured": measured,
+                         "coverage_pct": None, "arch": rootfs.arch},
+                triage_notes=["posture unknown; see the elfscan coverage event"],
+            )
+        elif pct < 80:
+            scope_sentence = (
+                f"None of the {measured} measured executables were built with "
+                f"-fstack-protector"
+                if present == 0 else
+                f"{absent} of the {measured} measured executables were built "
+                f"without -fstack-protector ({present} were)")
+            yield Finding(
+                detector_id=self.meta.id,
+                title=(f"Image-wide: stack canaries absent from "
+                       f"{absent} of {measured} measured executables "
+                       f"({pct:.0f}% covered)"
+                       + (f"; {unknown} unmeasured" if unknown else "")),
+                severity=Severity.MEDIUM if present == 0 else Severity.LOW,
+                axis=Axis.PRESENCE,
+                target=str(rootfs.root.name),
+                summary=(
+                    f"Stack canaries: {breakdown}. {scope_sentence}. Coverage "
+                    f"of {pct:.0f}% is over the {measured} binaries whose "
+                    f"symbols were readable"
+                    + (f"; {unknown} more could not be measured and are "
+                       f"excluded from that denominator." if unknown
+                       else ". Reported once rather than per binary.")
+                ),
+                confidence=Confidence.PROBABLE,
+                cwe=self.meta.cwe,
+                context={"locus": {"scope": "image", "mitigation": "canary"},
+                         "executables": n, "present": present, "absent": absent,
+                         "unknown": unknown, "measured": measured,
+                         "coverage_pct": round(pct, 1), "arch": rootfs.arch},
+                triage_notes=["aggregate finding; per-binary detail is in "
+                              "the inventory artifact"],
+            )
+
         # -- individually interesting binaries -------------------------
         for r in exe:
             path = r.get("path", "")
@@ -149,10 +304,14 @@ class HardeningAnalyzer:
                 or any(path.startswith(d) for d in INTERESTING_DIRS)
                 and ("cgi" in path or "httpd" in path or "web" in path)
             )
-            missing = [k for k, v in
-                       (("NX", m.get("nx")), ("canary", m.get("canary")),
-                        ("PIE", m.get("pie")))
-                       if not v]
+            # NX/PIE are two-valued. Canary is three-valued: only "absent" is
+            # a missing mitigation -- "unknown" means we could not read the
+            # symbol table and must not be reported as a defect.
+            canary_state = _canary_state(r)
+            missing = [k for k, absent in
+                       (("NX", not m.get("nx")), ("PIE", not m.get("pie")),
+                        ("canary", canary_state == "absent"))
+                       if absent]
             if not (reachable_hint and missing):
                 continue
 
@@ -185,25 +344,35 @@ class HardeningAnalyzer:
                 },
             )
 
-            # Proof: the binary's own hash. The ELF header bytes that encode
-            # the mitigation are inside the file we hashed, so re-parsing the
-            # stored blob reproduces the claim exactly.
-            blob = rootfs.root / path
-            if blob.is_file() and blob.stat().st_size < (16 << 20):
-                data = blob.read_bytes()
-                rel = ctx.store_blob(path.replace("/", "_"), data)
-                proof = ProofArtifact(
-                    kind="byte_match",
-                    claim={"blob": rel,
-                           "file_sha256": hashlib.sha256(data).hexdigest(),
-                           "offset": 0, "length": 64,
-                           "needle_sha256": hashlib.sha256(data[:64]).hexdigest()},
-                    blobs=[rel],
-                )
-                try:
-                    f.confirm(proof, ctx.artifact_root)
-                except Exception:
+            # Proof. A symbol-based claim ("lacks canary") is only CONFIRMED by
+            # evidence that re-derives *that* claim -- the searched string table
+            # region -- not by hashing the ELF header, which asserts nothing
+            # about symbols. When the finding rests on a phdr-derived mitigation
+            # instead (NX/PIE), we have no captured proof for it here, so the
+            # finding stays PROBABLE rather than borrowing a proof it cannot
+            # support. Asserting a proof the artifact does not back is the same
+            # class of error as the detector's old false "absent".
+            if "canary" in missing:
+                proof = _build_canary_proof(r, rootfs, ctx)
+                if proof is not None:
+                    try:
+                        f.confirm(proof, ctx.artifact_root)
+                    except Exception:
+                        f.confidence = Confidence.PROBABLE
+                        f.triage_notes.append(
+                            "canary proof did not verify; left unconfirmed")
+                else:
                     f.confidence = Confidence.PROBABLE
+                    f.triage_notes.append(
+                        "no raw symbol-table region available to prove the "
+                        "canary claim (symtab-section source); left unconfirmed")
+            else:
+                # NX/PIE-only finding: absence is read from the program headers,
+                # which we do not currently persist as a proof artifact.
+                f.confidence = Confidence.PROBABLE
+                f.triage_notes.append(
+                    "NX/PIE absence is read from the program headers; no proof "
+                    "artifact is captured for phdr-derived mitigations yet")
             yield f
 
 

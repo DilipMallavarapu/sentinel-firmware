@@ -19,6 +19,7 @@ memory, so the suite runs anywhere and does not depend on a fixture tree.
 
 from __future__ import annotations
 
+import hashlib
 import struct
 import sys
 import tempfile
@@ -38,7 +39,7 @@ _section = ""
 def section(name: str) -> None:
     global _section
     _section = name
-    print(f"\n== {name} ==")
+    print(f"\n{name}")
 
 
 def check(label: str, cond) -> None:
@@ -544,8 +545,14 @@ section("hardening: unknown is not absent")
 from sentinel.firmware.analyzers.hardening import HardeningAnalyzer  # noqa: E402
 
 an = HardeningAnalyzer()
-mit = {"nx": True, "pie": True, "canary": True, "relro": "full",
-       "fortify": True, "stripped": False, "text_relocs": False}
+mit = {"nx": True, "pie": True, "canary": "present", "relro": "full",
+       "fortify": "present", "stripped": False, "text_relocs": False}
+
+
+def _canary_agg(findings):
+    return [f for f in findings
+            if f.context.get("locus", {}).get("mitigation") == "canary"]
+
 
 # A file the worker could not parse carries no mitigation block. Counting it
 # as unhardened manufactures findings out of extraction failures.
@@ -559,7 +566,7 @@ good = [{"path": f"bin/p{i}", "type": "ET_EXEC", "mitigations": dict(mit)}
 check("a fully hardened image reports nothing",
       list(an.analyze(good, clean, [], ctx_for("hard2"))) == [])
 
-bad_mit = dict(mit, nx=False, canary=False, pie=False, relro="none")
+bad_mit = dict(mit, nx=False, canary="absent", pie=False, relro="none")
 bad = [{"path": f"bin/p{i}", "type": "ET_EXEC", "mitigations": dict(bad_mit)}
        for i in range(20)]
 agg = list(an.analyze(bad, clean, [], ctx_for("hard3")))
@@ -567,6 +574,44 @@ check("an unhardened image reports image-wide findings", len(agg) >= 2)
 check("aggregates are reported once, not per binary", len(agg) <= 6)
 check("aggregates stay below confirmed",
       all(f.confidence != Confidence.CONFIRMED for f in agg))
+_c = _canary_agg(agg)
+check("measured-absent canaries are a MEDIUM defect",
+      _c and _c[0].severity == Severity.MEDIUM
+      and _c[0].context["measured"] == 20)
+
+# The whole point of the three-state change: a binary whose symbol table could
+# not be read is *unknown*, and must not be counted or reported as absent.
+unk_mit = dict(mit, canary="unknown")
+unk = [{"path": f"bin/u{i}", "type": "ET_EXEC", "mitigations": dict(unk_mit),
+        "sym_evidence": {"source": "none", "reason": "no symbol table"}}
+       for i in range(20)]
+unk_out = list(an.analyze(unk, clean, [], ctx_for("hard_unk")))
+_cu = _canary_agg(unk_out)
+check("all-unknown canary posture is not a vendor defect",
+      _cu and all(f.severity == Severity.INFO for f in _cu))
+check("all-unknown canary posture reports a zero measured denominator",
+      _cu and _cu[0].context["measured"] == 0
+      and _cu[0].context["unknown"] == 20)
+check("unknown never masquerades as absent in the summary",
+      _cu and "unmeasur" in (_cu[0].title + _cu[0].summary).lower()
+      and "not a finding of absence" in _cu[0].summary.lower()
+      and _cu[0].context["absent"] == 0)
+
+# Coverage percentage is taken over measured binaries only; unknowns are
+# excluded from the denominator instead of dragging it down the way the old
+# reader did when it called every unreadable binary absent.
+denom = ([{"path": f"bin/g{i}", "type": "ET_EXEC", "mitigations": dict(mit)}
+          for i in range(6)]                                    # present
+         + [{"path": f"bin/b{i}", "type": "ET_EXEC",
+             "mitigations": dict(mit, canary="absent")} for i in range(4)]  # absent
+         + [{"path": f"bin/u{i}", "type": "ET_EXEC",
+             "mitigations": dict(mit, canary="unknown"),
+             "sym_evidence": {"source": "none"}} for i in range(10)])  # unknown
+dcov = _canary_agg(list(an.analyze(denom, clean, [], ctx_for("hard_denom"))))
+check("coverage is computed over measured, not total",
+      dcov and dcov[0].context["coverage_pct"] == 60.0
+      and dcov[0].context["measured"] == 10
+      and dcov[0].context["unknown"] == 10)
 
 # The interesting middle: a minority hardened. Firing only at exactly zero
 # coverage loses the case real vendor images actually present.
@@ -576,6 +621,97 @@ mixed = ([{"path": f"bin/g{i}", "type": "ET_EXEC", "mitigations": dict(mit)}
             for i in range(38)])
 check("partial coverage is still reported",
       len(list(an.analyze(mixed, clean, [], ctx_for("hard4")))) >= 1)
+
+
+# ==========================================================================
+section("symbol_presence: the proof re-derives the symbol claim")
+# ==========================================================================
+import struct as _struct  # noqa: E402
+from sentinel.core.contracts import ProofArtifact, verify_proof  # noqa: E402
+from sentinel.core.verifiers import _elf_has_no_symbol_source  # noqa: E402
+
+_vctx = ctx_for("symproof")
+
+
+def _sp(result, blob, **claim):
+    rel = _vctx.store_blob("region", blob)
+    claim.update({"blob": rel,
+                  "region_sha256": hashlib.sha256(blob).hexdigest(),
+                  "result": result})
+    return ProofArtifact(kind="symbol_presence", claim=claim, blobs=[rel])
+
+# present: the token must sit at the recorded offset in the stored region.
+region = b"printf\x00__stack_chk_fail\x00malloc\x00"
+off = region.index(b"stack_chk")
+check("present proof verifies when the token is at the claimed offset",
+      verify_proof(_sp("present", region, needle="stack_chk",
+                       match_off_in_region=off), _vctx.artifact_root))
+check("present proof fails when the offset does not hold the token",
+      not verify_proof(_sp("present", region, needle="stack_chk",
+                           match_off_in_region=0), _vctx.artifact_root))
+
+# absent: the stored blob is the whole searched region, so absence is complete.
+clean_region = b"printf\x00malloc\x00free\x00"
+check("absent proof verifies when the token is nowhere in the region",
+      verify_proof(_sp("absent", clean_region, needle="stack_chk"),
+                   _vctx.artifact_root))
+check("absent proof fails when the token is actually present",
+      not verify_proof(_sp("absent", region, needle="stack_chk"),
+                       _vctx.artifact_root))
+
+# tamper: mutating the stored blob breaks the region hash, so nothing verifies.
+_p = _sp("absent", clean_region, needle="stack_chk")
+(_vctx.artifact_root / _p.claim["blob"]).write_bytes(clean_region + b"junk")
+check("any edit to the stored region fails the proof",
+      not verify_proof(_p, _vctx.artifact_root))
+
+
+def _elf32(*, phnum=0, shnum=0, sh_type=0, with_dynamic=False):
+    """Minimal ELF32-LE image for exercising the unknown re-derivation."""
+    ehsize, phentsize, shentsize = 52, 32, 40
+    body = bytearray()
+    phoff = shoff = 0
+    # program headers first (if any), then section headers, after the header.
+    cursor = 64  # leave a little pad past the 52-byte header
+    phdrs = b""
+    if phnum:
+        # one PT_LOAD covering the strtab, optionally one PT_DYNAMIC
+        loads = _struct.pack("<IIIIIIII", 1, 0x100, 0x100, 0, 0x200, 0x200, 5, 0)
+        phdrs = loads
+        if with_dynamic:
+            dyn_off = 0  # filled after we know where the dynamic array lands
+        phoff = cursor
+    shdrs = b""
+    if shnum:
+        shdrs = _struct.pack("<IIIIIIIIII", 0, sh_type, 0, 0, 0, 0, 0, 0, 0, 0)
+    hdr = bytearray(64)
+    hdr[0:4] = b"\x7fELF"
+    hdr[4], hdr[5], hdr[6] = 1, 1, 1  # 32-bit, little-endian, v1
+    _struct.pack_into("<H", hdr, 16, 2)   # e_type EXEC
+    _struct.pack_into("<H", hdr, 18, 8)   # e_machine MIPS
+    _struct.pack_into("<I", hdr, 20, 1)   # e_version
+    _struct.pack_into("<H", hdr, 40, ehsize)
+    _struct.pack_into("<H", hdr, 42, phentsize)
+    _struct.pack_into("<H", hdr, 44, phnum)
+    _struct.pack_into("<H", hdr, 46, shentsize)
+    _struct.pack_into("<H", hdr, 48, shnum)
+    data = bytearray(hdr)
+    if phnum:
+        _struct.pack_into("<I", data, 28, len(data))  # e_phoff
+        data += phdrs
+    if shnum:
+        _struct.pack_into("<I", data, 32, len(data))  # e_shoff
+        data += shdrs
+    return bytes(data)
+
+check("no sections and no segments re-derives as unknown",
+      _elf_has_no_symbol_source(_elf32()))
+check("a SHT_SYMTAB section means a symbol source exists (not unknown)",
+      not _elf_has_no_symbol_source(_elf32(shnum=1, sh_type=2)))
+check("a SHT_DYNSYM section means a symbol source exists (not unknown)",
+      not _elf_has_no_symbol_source(_elf32(shnum=1, sh_type=11)))
+check("a non-symbol section (SHT_PROGBITS) still re-derives as unknown",
+      _elf_has_no_symbol_source(_elf32(shnum=1, sh_type=1)))
 
 
 # ==========================================================================

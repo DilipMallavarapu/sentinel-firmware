@@ -69,6 +69,138 @@ def verify_byte_match(proof: ProofArtifact, root: Path) -> bool:
     return _sha(data[off:off + ln]) == c.get("needle_sha256")
 
 
+@verifier("symbol_presence")
+def verify_symbol_presence(proof: ProofArtifact, root: Path) -> bool:
+    """
+    Re-derives a symbol-derived mitigation verdict (canary / fortify) from the
+    exact bytes that were searched, not from the ELF header.
+
+    This is the proof that byte_match(offset=0, length=64) could never be: the
+    old header proof re-confirmed the file was unchanged and asserted nothing
+    about whether a canary symbol was present. Here the stored blob *is* the
+    string table region (for present/absent) or the ELF header + program
+    header table (for unknown), and the verdict is reproduced from it.
+
+    claim, result == "present":
+        {"blob", "region_sha256", "needle": "stack_chk",
+         "match_off_in_region": 325}   # needle bytes sit at this offset
+
+    claim, result == "absent":
+        {"blob", "region_sha256", "needle": "stack_chk"}
+        # blob is the whole searched string table; the token appears nowhere
+
+    claim, result == "unknown":
+        {"blob", "region_sha256", "reason": "..."}
+        # blob is header+phdrs; re-derives that no symbol source exists at all
+    """
+    c = proof.claim
+    data = _read(root, c.get("blob", ""))
+    if data is None or _sha(data) != c.get("region_sha256"):
+        return False
+
+    result = c.get("result")
+    if result == "present":
+        needle = str(c.get("needle", "")).encode()
+        off = int(c.get("match_off_in_region", -1))
+        if not needle or off < 0 or off + len(needle) > len(data):
+            return False
+        return data[off:off + len(needle)] == needle
+    if result == "absent":
+        needle = str(c.get("needle", "")).encode()
+        # The blob is the entire region that was searched, so "not present in
+        # this region" is a complete, re-checkable statement of absence.
+        return bool(needle) and needle not in data
+    if result == "unknown":
+        # The claim is that no symbol source exists to read: no section headers
+        # and no PT_DYNAMIC segment. Both are re-derived from the raw header.
+        return _elf_has_no_symbol_source(data)
+    return False
+
+
+def _elf_has_no_symbol_source(data: bytes) -> bool:
+    """
+    Re-derives the worker's canary=unknown condition from the whole ELF: there
+    is *no* symbol-bearing section (SHT_SYMTAB / SHT_DYNSYM) **and** no dynamic
+    string table reachable from PT_DYNAMIC. This is a second, independent
+    implementation of scanSymbols' fallback logic -- if either symbol source
+    can be found, the verdict was not "unknown" and this returns False.
+
+    A note on why the ELF header alone is not enough: `strip -s` on a static
+    binary removes .symtab while keeping the section header table, so an
+    e_shnum==0 test would miss it. Only walking the sections for a symbol type,
+    and the segments for a usable strtab, reproduces what the worker did.
+    """
+    import struct
+    if len(data) < 64 or data[:4] != b"\x7fELF":
+        return False
+    is64 = data[4] == 2
+    end = "<" if data[5] == 1 else ">"
+    SHT_SYMTAB, SHT_DYNSYM, PT_DYNAMIC, PT_LOAD = 2, 11, 2, 1
+    DT_NULL, DT_STRTAB, DT_STRSZ = 0, 5, 10
+    try:
+        if is64:
+            e_phoff, e_shoff = struct.unpack_from(end + "QQ", data, 0x20)
+            e_phentsize, e_phnum = struct.unpack_from(end + "HH", data, 0x36)
+            e_shentsize, e_shnum = struct.unpack_from(end + "HH", data, 0x3A)
+        else:
+            e_phoff = struct.unpack_from(end + "I", data, 0x1C)[0]
+            e_shoff = struct.unpack_from(end + "I", data, 0x20)[0]
+            e_phentsize, e_phnum = struct.unpack_from(end + "HH", data, 0x2A)
+            e_shentsize, e_shnum = struct.unpack_from(end + "HH", data, 0x2E)
+
+        # 1) any symbol-bearing section -> the worker could read symbols.
+        for i in range(e_shnum):
+            base = e_shoff + i * e_shentsize
+            if base + 8 > len(data):
+                return False  # section table not fully captured; cannot re-derive
+            sh_type = struct.unpack_from(end + "I", data, base + 4)[0]
+            if sh_type in (SHT_SYMTAB, SHT_DYNSYM):
+                return False
+
+        # 2) a dynamic segment whose DT_STRTAB lands in a loadable segment ->
+        #    the worker could read .dynstr. Reproduce that lookup exactly.
+        loads = []  # (vaddr, off, filesz)
+        dyn = None  # (off, filesz)
+        for i in range(e_phnum):
+            base = e_phoff + i * e_phentsize
+            if base + e_phentsize > len(data):
+                return False
+            p_type = struct.unpack_from(end + "I", data, base)[0]
+            if is64:
+                p_off, p_vaddr = struct.unpack_from(end + "QQ", data, base + 8)
+                p_filesz = struct.unpack_from(end + "Q", data, base + 32)[0]
+            else:
+                p_off, p_vaddr, _pp, p_filesz = struct.unpack_from(
+                    end + "IIII", data, base + 4)
+            if p_type == PT_LOAD:
+                loads.append((p_vaddr, p_off, p_filesz))
+            elif p_type == PT_DYNAMIC:
+                dyn = (p_off, p_filesz)
+
+        if dyn is not None:
+            off, size = dyn
+            step = 16 if is64 else 8
+            strtab_va = strsz = None
+            for p in range(off, min(off + size, len(data)) - step + 1, step):
+                if is64:
+                    tag, val = struct.unpack_from(end + "QQ", data, p)
+                else:
+                    tag, val = struct.unpack_from(end + "II", data, p)
+                if tag == DT_STRTAB:
+                    strtab_va = val
+                elif tag == DT_STRSZ:
+                    strsz = val
+                elif tag == DT_NULL:
+                    break
+            if strtab_va is not None and strsz:
+                for vaddr, poff, filesz in loads:
+                    if vaddr <= strtab_va and strtab_va + strsz <= vaddr + filesz:
+                        return False  # .dynstr is readable: not unknown
+    except struct.error:
+        return False
+    return True
+
+
 @verifier("pattern_match")
 def verify_pattern_match(proof: ProofArtifact, root: Path) -> bool:
     """
